@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Browser Pet",
+  "name": "NotesSmith",
   "version": "1.1.0",
-  "description": "A small animated 2D companion pet that lives inside your browser tabs when summoned.",
+  "description": "Your retro desktop companion for rich notes, screenshots, image attachments, and PDF export.",
   "permissions": [
     "storage",
     "activeTab",
@@ -17,7 +17,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Browser Pet"
+    "default_title": "NotesSmith"
   },
   "content_scripts": [
     {
