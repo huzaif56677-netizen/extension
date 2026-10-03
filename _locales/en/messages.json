@@ -1,0 +1,10 @@
+{
+  "extensionName": {
+    "message": "NotesSmith",
+    "description": "Extension name"
+  },
+  "extensionDescription": {
+    "message": "Your retro desktop companion for rich notes, screenshots, image attachments, and PDF export.",
+    "description": "Extension description"
+  }
+}
