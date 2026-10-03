@@ -575,26 +575,628 @@
   }
 
   // ----------------------------------------------------------
-  // PHASE 3 — MENU ACTION STUBS (Phase 4 will implement these)
+  // PHASE 4 — NOTES SYSTEM
+  // ----------------------------------------------------------
+  //
+  // NEW CONCEPTS:
+  //
+  // 1. chrome.storage.local
+  //    A key-value store provided by the Chrome Extension API.
+  //    Data persists across browser sessions and is shared
+  //    across all tabs.
+  //
+  //    chrome.storage.local.get(keys, callback)
+  //      Reads data. `keys` can be a string or array of strings.
+  //      The callback receives an object with the values.
+  //
+  //    chrome.storage.local.set(data, callback)
+  //      Writes data. `data` is an object of key-value pairs.
+  //
+  //    Unlike localStorage, chrome.storage.local:
+  //      - Is available in content scripts
+  //      - Has much larger storage limits (5MB+)
+  //      - Supports asynchronous operations
+  //      - Persists across all tabs of the extension
+  //
+  // 2. Dynamic Panels (Overlay UI)
+  //    We create floating panels for note creation and viewing.
+  //    Each panel is a <div> built entirely with createElement(),
+  //    styled via JavaScript, and positioned near the pet.
+  //
+  // 3. Data Model
+  //    Notes are stored as an array of objects:
+  //    [{ id, title, content, createdAt }, ...]
+  //    Each note gets a unique ID from Date.now() — simple
+  //    and good enough for local single-user storage.
+  //
+
+  let activePanel = null; // Track which panel is open
+
+  // ----------------------------------------------------------
+  // SHARED PANEL STYLING HELPERS
+  // ----------------------------------------------------------
+
+  /**
+   * createPanel — creates a styled floating panel near the pet.
+   *
+   * Returns the panel <div> element. The caller adds content to it.
+   */
+  function createPanel(title) {
+    // Close any existing panel first
+    closePanel();
+
+    const panel = document.createElement("div");
+    panel.className = "browser-pet-panel";
+
+    Object.assign(panel.style, {
+      position: "fixed",
+      zIndex: "2147483646",
+      width: "320px",
+      maxHeight: "420px",
+      padding: "0",
+      borderRadius: "16px",
+      background: "rgba(18, 18, 30, 0.92)",
+      backdropFilter: "blur(16px)",
+      WebkitBackdropFilter: "blur(16px)",
+      border: "1px solid rgba(255, 255, 255, 0.1)",
+      boxShadow: "0 12px 48px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255,255,255,0.04)",
+      fontFamily: "'Segoe UI', 'Inter', system-ui, sans-serif",
+      fontSize: "13px",
+      color: "#e0e0e0",
+      overflow: "hidden",
+      display: "flex",
+      flexDirection: "column",
+      opacity: "0",
+      transform: "scale(0.95) translateY(8px)",
+      transition: "opacity 0.2s ease, transform 0.2s ease",
+    });
+
+    // Header bar
+    const header = document.createElement("div");
+    Object.assign(header.style, {
+      padding: "14px 16px",
+      borderBottom: "1px solid rgba(255,255,255,0.08)",
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      flexShrink: "0",
+    });
+
+    const titleEl = document.createElement("span");
+    titleEl.textContent = title;
+    Object.assign(titleEl.style, {
+      fontSize: "14px",
+      fontWeight: "600",
+      color: "#ffffff",
+      letterSpacing: "0.3px",
+    });
+
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "✕";
+    Object.assign(closeBtn.style, {
+      background: "none",
+      border: "none",
+      color: "#888",
+      fontSize: "16px",
+      cursor: "pointer",
+      padding: "2px 6px",
+      borderRadius: "4px",
+      transition: "color 0.15s, background 0.15s",
+      fontFamily: "inherit",
+    });
+    closeBtn.addEventListener("mouseenter", function () {
+      closeBtn.style.color = "#fff";
+      closeBtn.style.background = "rgba(255,255,255,0.1)";
+    });
+    closeBtn.addEventListener("mouseleave", function () {
+      closeBtn.style.color = "#888";
+      closeBtn.style.background = "none";
+    });
+    closeBtn.addEventListener("click", closePanel);
+
+    header.appendChild(titleEl);
+    header.appendChild(closeBtn);
+    panel.appendChild(header);
+
+    // Position near pet
+    const petRect = pet.getBoundingClientRect();
+    let panelX = petRect.left - 340;
+    let panelY = petRect.top + petRect.height / 2 - 200;
+
+    // If not enough space on left, position on right
+    if (panelX < 8) {
+      panelX = petRect.right + 20;
+    }
+    // Keep in viewport vertically
+    panelY = Math.max(8, Math.min(panelY, window.innerHeight - 430));
+    // Keep in viewport horizontally
+    panelX = Math.max(8, Math.min(panelX, window.innerWidth - 330));
+
+    panel.style.left = panelX + "px";
+    panel.style.top = panelY + "px";
+
+    document.body.appendChild(panel);
+    activePanel = panel;
+
+    // Animate in
+    void panel.offsetHeight;
+    panel.style.opacity = "1";
+    panel.style.transform = "scale(1) translateY(0)";
+
+    return panel;
+  }
+
+  function closePanel() {
+    if (!activePanel) return;
+    const p = activePanel;
+    activePanel = null;
+    p.style.opacity = "0";
+    p.style.transform = "scale(0.95) translateY(8px)";
+    setTimeout(function () {
+      if (p.parentNode) p.parentNode.removeChild(p);
+    }, 200);
+  }
+
+  /**
+   * createStyledButton — helper to make consistent panel buttons.
+   */
+  function createStyledButton(text, bgColor, textColor) {
+    const btn = document.createElement("button");
+    btn.textContent = text;
+    Object.assign(btn.style, {
+      padding: "9px 18px",
+      border: "none",
+      borderRadius: "8px",
+      background: bgColor || "rgba(99, 102, 241, 0.8)",
+      color: textColor || "#ffffff",
+      fontSize: "13px",
+      fontFamily: "inherit",
+      cursor: "pointer",
+      transition: "opacity 0.15s, transform 0.1s",
+      outline: "none",
+      fontWeight: "500",
+    });
+    btn.addEventListener("mouseenter", function () {
+      btn.style.opacity = "0.85";
+      btn.style.transform = "translateY(-1px)";
+    });
+    btn.addEventListener("mouseleave", function () {
+      btn.style.opacity = "1";
+      btn.style.transform = "translateY(0)";
+    });
+    return btn;
+  }
+
+  /**
+   * createStyledInput — helper for text inputs.
+   */
+  function createStyledInput(placeholder) {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = placeholder;
+    Object.assign(input.style, {
+      width: "100%",
+      padding: "10px 12px",
+      border: "1px solid rgba(255,255,255,0.1)",
+      borderRadius: "8px",
+      background: "rgba(255,255,255,0.06)",
+      color: "#e0e0e0",
+      fontSize: "13px",
+      fontFamily: "inherit",
+      outline: "none",
+      transition: "border-color 0.15s",
+      boxSizing: "border-box",
+    });
+    input.addEventListener("focus", function () {
+      input.style.borderColor = "rgba(99, 102, 241, 0.6)";
+    });
+    input.addEventListener("blur", function () {
+      input.style.borderColor = "rgba(255,255,255,0.1)";
+    });
+    return input;
+  }
+
+  /**
+   * createStyledTextarea — helper for content areas.
+   */
+  function createStyledTextarea(placeholder) {
+    const textarea = document.createElement("textarea");
+    textarea.placeholder = placeholder;
+    Object.assign(textarea.style, {
+      width: "100%",
+      height: "120px",
+      padding: "10px 12px",
+      border: "1px solid rgba(255,255,255,0.1)",
+      borderRadius: "8px",
+      background: "rgba(255,255,255,0.06)",
+      color: "#e0e0e0",
+      fontSize: "13px",
+      fontFamily: "inherit",
+      outline: "none",
+      resize: "vertical",
+      transition: "border-color 0.15s",
+      boxSizing: "border-box",
+      lineHeight: "1.5",
+    });
+    textarea.addEventListener("focus", function () {
+      textarea.style.borderColor = "rgba(99, 102, 241, 0.6)";
+    });
+    textarea.addEventListener("blur", function () {
+      textarea.style.borderColor = "rgba(255,255,255,0.1)";
+    });
+    return textarea;
+  }
+
+  // ----------------------------------------------------------
+  // CREATE NOTE
   // ----------------------------------------------------------
 
   function doCreateNote() {
-    // Will be implemented in Phase 4
-    console.log("[Browser Pet] Create New Note — coming in Phase 4");
-  }
+    const panel = createPanel("📝 Create New Note");
 
-  function doMyNotes() {
-    // Will be implemented in Phase 4
-    console.log("[Browser Pet] My Notes — coming in Phase 4");
-  }
+    const body = document.createElement("div");
+    Object.assign(body.style, {
+      padding: "16px",
+      display: "flex",
+      flexDirection: "column",
+      gap: "12px",
+    });
 
-  function doSettings() {
-    // Will be implemented in Phase 4
-    console.log("[Browser Pet] Settings — coming soon");
+    const titleInput = createStyledInput("Note title...");
+    const contentArea = createStyledTextarea("Write your note here...");
+
+    // Button row
+    const btnRow = document.createElement("div");
+    Object.assign(btnRow.style, {
+      display: "flex",
+      gap: "8px",
+      justifyContent: "flex-end",
+    });
+
+    const cancelBtn = createStyledButton("Cancel", "rgba(255,255,255,0.08)", "#aaa");
+    cancelBtn.addEventListener("click", closePanel);
+
+    const saveBtn = createStyledButton("💾 Save", "rgba(99, 102, 241, 0.8)", "#fff");
+    saveBtn.addEventListener("click", function () {
+      const title = titleInput.value.trim();
+      const content = contentArea.value.trim();
+
+      if (!title && !content) {
+        titleInput.style.borderColor = "rgba(239, 68, 68, 0.6)";
+        return;
+      }
+
+      const note = {
+        id: Date.now(),
+        title: title || "Untitled Note",
+        content: content,
+        createdAt: new Date().toLocaleString(),
+      };
+
+      // Read existing notes, add new one, save back
+      chrome.storage.local.get({ petNotes: [] }, function (result) {
+        const notes = result.petNotes;
+        notes.unshift(note); // Add to beginning (newest first)
+        chrome.storage.local.set({ petNotes: notes }, function () {
+          closePanel();
+          // Brief flash on pet to confirm save
+          pet.style.filter = "brightness(1.5)";
+          setTimeout(function () { pet.style.filter = ""; }, 300);
+        });
+      });
+    });
+
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(saveBtn);
+
+    body.appendChild(titleInput);
+    body.appendChild(contentArea);
+    body.appendChild(btnRow);
+    panel.appendChild(body);
+
+    // Auto-focus the title input
+    setTimeout(function () { titleInput.focus(); }, 100);
   }
 
   // ----------------------------------------------------------
-  // All phases so far:
+  // VIEW NOTES (My Notes)
+  // ----------------------------------------------------------
+
+  function doMyNotes() {
+    const panel = createPanel("📒 My Notes");
+
+    const body = document.createElement("div");
+    Object.assign(body.style, {
+      padding: "8px",
+      overflowY: "auto",
+      maxHeight: "350px",
+      flexGrow: "1",
+    });
+
+    // Loading state
+    body.textContent = "Loading...";
+    body.style.padding = "16px";
+    body.style.color = "#888";
+    panel.appendChild(body);
+
+    chrome.storage.local.get({ petNotes: [] }, function (result) {
+      const notes = result.petNotes;
+      body.textContent = "";
+      body.style.padding = "8px";
+      body.style.color = "#e0e0e0";
+
+      if (notes.length === 0) {
+        const empty = document.createElement("div");
+        Object.assign(empty.style, {
+          textAlign: "center",
+          padding: "32px 16px",
+          color: "#666",
+          fontSize: "13px",
+        });
+        empty.innerHTML = "📭<br><br>No notes yet.<br>Click <b>Create New Note</b> to get started!";
+        body.appendChild(empty);
+        return;
+      }
+
+      notes.forEach(function (note, index) {
+        const card = document.createElement("div");
+        Object.assign(card.style, {
+          padding: "12px 14px",
+          marginBottom: "6px",
+          borderRadius: "10px",
+          background: "rgba(255,255,255,0.04)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          cursor: "default",
+          transition: "background 0.15s",
+        });
+        card.addEventListener("mouseenter", function () {
+          card.style.background = "rgba(255,255,255,0.08)";
+        });
+        card.addEventListener("mouseleave", function () {
+          card.style.background = "rgba(255,255,255,0.04)";
+        });
+
+        // Note header (title + delete button)
+        const cardHeader = document.createElement("div");
+        Object.assign(cardHeader.style, {
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          marginBottom: "4px",
+        });
+
+        const titleEl = document.createElement("div");
+        titleEl.textContent = note.title || "Untitled";
+        Object.assign(titleEl.style, {
+          fontWeight: "600",
+          fontSize: "13px",
+          color: "#fff",
+          flex: "1",
+          marginRight: "8px",
+          wordBreak: "break-word",
+        });
+
+        const deleteBtn = document.createElement("button");
+        deleteBtn.textContent = "🗑";
+        Object.assign(deleteBtn.style, {
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          fontSize: "14px",
+          padding: "2px 4px",
+          borderRadius: "4px",
+          transition: "background 0.15s",
+          flexShrink: "0",
+          opacity: "0.5",
+        });
+        deleteBtn.addEventListener("mouseenter", function () {
+          deleteBtn.style.background = "rgba(239,68,68,0.2)";
+          deleteBtn.style.opacity = "1";
+        });
+        deleteBtn.addEventListener("mouseleave", function () {
+          deleteBtn.style.background = "none";
+          deleteBtn.style.opacity = "0.5";
+        });
+        deleteBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          deleteNote(note.id);
+        });
+
+        cardHeader.appendChild(titleEl);
+        cardHeader.appendChild(deleteBtn);
+        card.appendChild(cardHeader);
+
+        // Note content preview
+        if (note.content) {
+          const contentEl = document.createElement("div");
+          contentEl.textContent = note.content.length > 100
+            ? note.content.substring(0, 100) + "..."
+            : note.content;
+          Object.assign(contentEl.style, {
+            fontSize: "12px",
+            color: "#999",
+            lineHeight: "1.4",
+            marginBottom: "6px",
+            wordBreak: "break-word",
+          });
+          card.appendChild(contentEl);
+        }
+
+        // Date
+        const dateEl = document.createElement("div");
+        dateEl.textContent = note.createdAt || "";
+        Object.assign(dateEl.style, {
+          fontSize: "11px",
+          color: "#555",
+        });
+        card.appendChild(dateEl);
+
+        body.appendChild(card);
+      });
+    });
+  }
+
+  /**
+   * deleteNote — remove a note by ID and refresh the list.
+   */
+  function deleteNote(noteId) {
+    chrome.storage.local.get({ petNotes: [] }, function (result) {
+      const notes = result.petNotes.filter(function (n) {
+        return n.id !== noteId;
+      });
+      chrome.storage.local.set({ petNotes: notes }, function () {
+        // Refresh the notes view
+        doMyNotes();
+      });
+    });
+  }
+
+  // ----------------------------------------------------------
+  // SETTINGS
+  // ----------------------------------------------------------
+
+  function doSettings() {
+    const panel = createPanel("⚙️ Settings");
+
+    const body = document.createElement("div");
+    Object.assign(body.style, {
+      padding: "16px",
+      display: "flex",
+      flexDirection: "column",
+      gap: "16px",
+    });
+
+    // Pet Scale setting
+    const scaleGroup = document.createElement("div");
+
+    const scaleLabel = document.createElement("label");
+    scaleLabel.textContent = "Pet Size";
+    Object.assign(scaleLabel.style, {
+      fontSize: "13px",
+      fontWeight: "500",
+      color: "#ccc",
+      display: "block",
+      marginBottom: "8px",
+    });
+
+    const scaleRow = document.createElement("div");
+    Object.assign(scaleRow.style, {
+      display: "flex",
+      alignItems: "center",
+      gap: "12px",
+    });
+
+    const scaleSlider = document.createElement("input");
+    scaleSlider.type = "range";
+    scaleSlider.min = "1";
+    scaleSlider.max = "4";
+    scaleSlider.step = "0.5";
+    scaleSlider.value = String(SCALE);
+    Object.assign(scaleSlider.style, {
+      flex: "1",
+      accentColor: "#6366f1",
+      cursor: "pointer",
+    });
+
+    const scaleValue = document.createElement("span");
+    scaleValue.textContent = SCALE + "×";
+    Object.assign(scaleValue.style, {
+      fontSize: "13px",
+      color: "#aaa",
+      minWidth: "30px",
+    });
+
+    scaleSlider.addEventListener("input", function () {
+      const newScale = parseFloat(scaleSlider.value);
+      scaleValue.textContent = newScale + "×";
+      // Update pet display size
+      pet.style.width = (FRAME_WIDTH * newScale) + "px";
+      pet.style.height = (FRAME_HEIGHT * newScale) + "px";
+      pet.style.backgroundSize = (FRAME_WIDTH * TOTAL_FRAMES * newScale) + "px " + (FRAME_HEIGHT * newScale) + "px";
+      // Re-render current frame at new scale
+      const offsetX = -(currentFrame * FRAME_WIDTH * newScale);
+      pet.style.backgroundPosition = offsetX + "px 0";
+    });
+
+    scaleRow.appendChild(scaleSlider);
+    scaleRow.appendChild(scaleValue);
+    scaleGroup.appendChild(scaleLabel);
+    scaleGroup.appendChild(scaleRow);
+    body.appendChild(scaleGroup);
+
+    // Divider
+    const divider = document.createElement("div");
+    Object.assign(divider.style, {
+      height: "1px",
+      background: "rgba(255,255,255,0.06)",
+    });
+    body.appendChild(divider);
+
+    // Clear all notes
+    const dangerGroup = document.createElement("div");
+
+    const dangerLabel = document.createElement("label");
+    dangerLabel.textContent = "Danger Zone";
+    Object.assign(dangerLabel.style, {
+      fontSize: "13px",
+      fontWeight: "500",
+      color: "#ef4444",
+      display: "block",
+      marginBottom: "8px",
+    });
+
+    const clearBtn = createStyledButton("🗑 Delete All Notes", "rgba(239, 68, 68, 0.2)", "#ef4444");
+    clearBtn.style.width = "100%";
+    clearBtn.addEventListener("click", function () {
+      if (clearBtn.dataset.confirm === "true") {
+        chrome.storage.local.set({ petNotes: [] }, function () {
+          clearBtn.textContent = "✓ All notes deleted";
+          clearBtn.style.background = "rgba(34, 197, 94, 0.2)";
+          clearBtn.style.color = "#22c55e";
+          setTimeout(closePanel, 1000);
+        });
+      } else {
+        clearBtn.dataset.confirm = "true";
+        clearBtn.textContent = "⚠️ Click again to confirm";
+        clearBtn.style.background = "rgba(239, 68, 68, 0.35)";
+        setTimeout(function () {
+          clearBtn.dataset.confirm = "false";
+          clearBtn.textContent = "🗑 Delete All Notes";
+          clearBtn.style.background = "rgba(239, 68, 68, 0.2)";
+          clearBtn.style.color = "#ef4444";
+        }, 3000);
+      }
+    });
+
+    dangerGroup.appendChild(dangerLabel);
+    dangerGroup.appendChild(clearBtn);
+    body.appendChild(dangerGroup);
+
+    // Version info
+    const versionEl = document.createElement("div");
+    versionEl.textContent = "Browser Pet v1.0.0";
+    Object.assign(versionEl.style, {
+      fontSize: "11px",
+      color: "#444",
+      textAlign: "center",
+      marginTop: "4px",
+    });
+    body.appendChild(versionEl);
+
+    panel.appendChild(body);
+  }
+
+  // Close panel on outside click (similar to menu)
+  document.addEventListener("mousedown", function (e) {
+    if (!activePanel) return;
+    if (activePanel.contains(e.target)) return;
+    if (pet.contains(e.target)) return;
+    if (menu && menu.contains(e.target)) return;
+    closePanel();
+  }, true);
+
+  // ----------------------------------------------------------
+  // All phases complete! 🎉
   //
   //  ✓ Pet appears on every webpage (Phase 1)
   //  ✓ Stays fixed in the viewport (Phase 1)
@@ -608,6 +1210,11 @@
   //  ✓ Menu closes on outside click (Phase 3)
   //  ✓ ⚔️ Attack swings sword (Phase 3.5)
   //  ✓ Click vs drag properly distinguished (Phase 3)
+  //  ✓ Create notes with title + content (Phase 4)
+  //  ✓ View all saved notes (Phase 4)
+  //  ✓ Delete individual notes (Phase 4)
+  //  ✓ Delete all notes with confirmation (Phase 4)
+  //  ✓ Notes persist via chrome.storage.local (Phase 4)
+  //  ✓ Pet size settings (Phase 4)
   // ----------------------------------------------------------
 })();
-
