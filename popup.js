@@ -27,8 +27,11 @@ document.addEventListener("DOMContentLoaded", function () {
       url.startsWith("chrome-extension://") ||
       url.startsWith("devtools://") ||
       url.startsWith("edge://") ||
+      url.startsWith("extension://") ||
       url.startsWith("about:") ||
-      url.includes("chromewebstore.google.com")
+      url.startsWith("view-source:") ||
+      url.includes("chromewebstore.google.com") ||
+      url.includes("microsoftedge.microsoft.com")
     );
   }
 
