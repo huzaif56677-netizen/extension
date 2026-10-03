@@ -71,6 +71,8 @@ window.BrowserPet = window.BrowserPet || {};
     mouseDownY: 0,
     prevMouseX: 0,
     prevMouseY: 0,
+    posXRatio: 1,
+    posYRatio: 1,
     abortController: null,
   };
 

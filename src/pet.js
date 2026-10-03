@@ -97,6 +97,7 @@ window.BrowserPet = window.BrowserPet || {};
       (Pet.FRAME_WIDTH * Pet.TOTAL_FRAMES * state.currentScale) + "px " +
       (Pet.FRAME_HEIGHT * state.currentScale) + "px";
     showFrame(state.currentFrame);
+    onWindowResize();
   }
 
   // ============================================================
@@ -324,13 +325,15 @@ window.BrowserPet = window.BrowserPet || {};
     let newY = e.clientY - state.dragOffsetY;
     const petW = Pet.FRAME_WIDTH * state.currentScale;
     const petH = Pet.FRAME_HEIGHT * state.currentScale;
-    const maxX = window.innerWidth - petW;
-    const maxY = window.innerHeight - petH;
+    const maxX = Math.max(1, window.innerWidth - petW);
+    const maxY = Math.max(1, window.innerHeight - petH);
     newX = Math.max(0, Math.min(newX, maxX));
     newY = Math.max(0, Math.min(newY, maxY));
 
     state.pet.style.left = newX + "px";
     state.pet.style.top = newY + "px";
+    state.posXRatio = newX / maxX;
+    state.posYRatio = newY / maxY;
 
     const newDir = getDirection(e.clientX, e.clientY);
     setAnimation("run", newDir);
@@ -342,7 +345,16 @@ window.BrowserPet = window.BrowserPet || {};
   function onDocMouseUp(e) {
     if (!state.isDragging) return;
     state.isDragging = false;
-    if (state.pet) state.pet.style.cursor = "grab";
+    if (state.pet) {
+      state.pet.style.cursor = "grab";
+      const petW = Pet.FRAME_WIDTH * state.currentScale;
+      const petH = Pet.FRAME_HEIGHT * state.currentScale;
+      const maxX = Math.max(1, window.innerWidth - petW);
+      const maxY = Math.max(1, window.innerHeight - petH);
+      const rect = state.pet.getBoundingClientRect();
+      state.posXRatio = Math.max(0, Math.min(1, rect.left / maxX));
+      state.posYRatio = Math.max(0, Math.min(1, rect.top / maxY));
+    }
 
     if (state.hasDragged) {
       setAnimation("idle", "down");
@@ -356,6 +368,50 @@ window.BrowserPet = window.BrowserPet || {};
     if (state.pet && state.pet.contains(e.target)) return;
     if (state.menu && state.menu.contains(e.target)) return;
     closeMenu();
+  }
+
+  function onWindowResize() {
+    if (!state.pet) return;
+
+    const petW = Pet.FRAME_WIDTH * state.currentScale;
+    const petH = Pet.FRAME_HEIGHT * state.currentScale;
+    const maxX = Math.max(0, window.innerWidth - petW);
+    const maxY = Math.max(0, window.innerHeight - petH);
+
+    let targetX, targetY;
+    if (typeof state.posXRatio === "number" && typeof state.posYRatio === "number") {
+      targetX = state.posXRatio * maxX;
+      targetY = state.posYRatio * maxY;
+    } else {
+      const curLeft = parseFloat(state.pet.style.left) || 0;
+      const curTop = parseFloat(state.pet.style.top) || 0;
+      targetX = curLeft;
+      targetY = curTop;
+    }
+
+    targetX = Math.max(0, Math.min(targetX, maxX));
+    targetY = Math.max(0, Math.min(targetY, maxY));
+
+    state.pet.style.left = targetX + "px";
+    state.pet.style.top = targetY + "px";
+    state.pet.style.right = "auto";
+    state.pet.style.bottom = "auto";
+
+    if (state.menuOpen && state.menu) {
+      positionMenu();
+    }
+
+    if (state.activePanel) {
+      const pRect = state.activePanel.getBoundingClientRect();
+      const pW = pRect.width || 350;
+      const pH = pRect.height || 400;
+      const maxPanelX = Math.max(0, window.innerWidth - pW);
+      const maxPanelY = Math.max(0, window.innerHeight - pH);
+      const curX = parseFloat(state.activePanel.style.left) || pRect.left;
+      const curY = parseFloat(state.activePanel.style.top) || pRect.top;
+      state.activePanel.style.left = Math.max(0, Math.min(curX, maxPanelX)) + "px";
+      state.activePanel.style.top = Math.max(0, Math.min(curY, maxPanelY)) + "px";
+    }
   }
 
   function onDocMouseDownCapture(e) {
@@ -384,11 +440,15 @@ window.BrowserPet = window.BrowserPet || {};
 
     const petW = Pet.FRAME_WIDTH * state.currentScale;
     const petH = Pet.FRAME_HEIGHT * state.currentScale;
+    const maxInitX = Math.max(0, window.innerWidth - petW);
+    const maxInitY = Math.max(0, window.innerHeight - petH);
+    const initialLeft = Math.max(0, window.innerWidth - petW - Pet.MARGIN);
+    const initialTop = Math.max(0, window.innerHeight - petH - Pet.MARGIN);
 
     Object.assign(state.pet.style, {
       position: "fixed",
-      bottom: Pet.MARGIN + "px",
-      right: Pet.MARGIN + "px",
+      left: initialLeft + "px",
+      top: initialTop + "px",
       zIndex: "2147483647",
       width: petW + "px",
       height: petH + "px",
@@ -406,6 +466,9 @@ window.BrowserPet = window.BrowserPet || {};
       padding: "0",
       margin: "0",
     });
+
+    state.posXRatio = maxInitX > 0 ? (initialLeft / maxInitX) : 1;
+    state.posYRatio = maxInitY > 0 ? (initialTop / maxInitY) : 1;
 
     document.body.appendChild(state.pet);
 
@@ -437,6 +500,7 @@ window.BrowserPet = window.BrowserPet || {};
     document.addEventListener("mouseup", onDocMouseUp, { signal: signal });
     document.addEventListener("click", onDocClick, { signal: signal });
     document.addEventListener("mousedown", onDocMouseDownCapture, { capture: true, signal: signal });
+    window.addEventListener("resize", onWindowResize, { signal: signal });
   }
 
   function hidePet() {
