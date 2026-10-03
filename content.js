@@ -1,58 +1,28 @@
 // ============================================================
-// Browser Pet — Phase 1 + Phase 2: Pet with Sprite Animation
+// Browser Pet — Complete Extension
 // ============================================================
+// Features:
+//   ✓ Animated 2D pet with directional sprites (idle, run, attack)
+//   ✓ Draggable with viewport clamping
+//   ✓ Click menu with actions
+//   ✓ Notes system with chrome.storage.local + direct PDF export
+//   ✓ Hide/Show pet (zero CPU when hidden)
+//   ✓ Faces front ("down") when idle
 //
-// PHASE 1 CONCEPTS (still used):
-//   document.createElement(), DOM manipulation, position:fixed,
-//   chrome.runtime.getURL(), mouse events, offset calculation,
-//   viewport clamping.
-//
-// PHASE 2 — NEW CONCEPTS:
-//
-// 1. Sprite Sheet Animation
-//    A sprite sheet is a single image containing multiple frames
-//    laid out in a row. Our sheets are 768×80 with 8 frames,
-//    so each frame is 96×80.
-//
-//    To animate, we change `background-position` over time:
-//      Frame 0 → background-position: 0px 0
-//      Frame 1 → background-position: -96px 0   (at 2× scale: -192px)
-//      Frame 2 → background-position: -192px 0  (at 2× scale: -384px)
-//      ...
-//    The negative offset slides the sheet left, revealing the
-//    next frame through the fixed-size "window" (the div).
-//
-// 2. setInterval / clearInterval
-//    setInterval(fn, ms) calls `fn` every `ms` milliseconds.
-//    We use it to advance sprite frames at a steady rate
-//    (e.g. 150ms per frame ≈ 6.67 FPS — good for pixel art).
-//    clearInterval() stops it. We only run the timer when
-//    animation is needed → saves CPU when the pet is still.
-//
-// 3. Directional Sprites
-//    The sprite pack has 4 directions: right, left, up, down.
-//    We track the pet's facing direction and load the matching
-//    sprite sheet (e.g. idle_left.png vs idle_right.png).
-//    During dragging, we determine direction from the delta
-//    between the current and previous mouse position.
-//
-// 4. Animation State Machine
-//    The pet has an animation state:
-//      "idle"  → plays idle_<direction>.png in a loop
-//      "run"   → plays run_<direction>.png in a loop
-//    Transitions:
-//      idle → run   (when drag starts)
-//      run  → idle  (when drag ends)
-//    Only one animation timer runs at a time.
-//
+// Architecture:
+//   initPet()  — creates the pet, DOM elements, event listeners
+//   hidePet()  — destroys everything, aborts listeners, zero CPU
+//   AbortController — used to cleanly remove document-level
+//                     event listeners when hiding the pet
+//   chrome.runtime.onMessage — listens for show/hide from popup
 // ============================================================
 
 (function () {
   "use strict";
 
-  // ----------------------------------------------------------
-  // CONFIGURATION
-  // ----------------------------------------------------------
+  // ============================================================
+  // CONSTANTS
+  // ============================================================
 
   const FRAME_WIDTH = 96;
   const FRAME_HEIGHT = 80;
@@ -62,17 +32,40 @@
   const PET_DISPLAY_HEIGHT = FRAME_HEIGHT * SCALE;  // 160
   const MARGIN = 20;
 
-  // Animation speed: milliseconds per frame.
-  // 150ms ≈ 6.67 FPS — a good speed for pixel-art animation.
-  const IDLE_FRAME_DURATION = 150;
-  const RUN_FRAME_DURATION = 100;  // Slightly faster for running
+  const IDLE_FRAME_DURATION = 150;  // ms per frame (~6.7 FPS)
+  const RUN_FRAME_DURATION = 100;
+  const ATTACK_FRAME_DURATION = 100;
 
-  // ----------------------------------------------------------
-  // SPRITE URL HELPER
-  // ----------------------------------------------------------
-  // Builds the full chrome-extension:// URL for a sprite sheet.
-  // Example: getSpriteURL("IDLE", "right") →
-  //   chrome-extension://…/assets/Sprites/IDLE/idle_right.png
+  const DRAG_THRESHOLD = 5;  // px — less = click, more = drag
+  const DIR_THRESHOLD = 3;   // px — minimum movement to change direction
+
+  // ============================================================
+  // MUTABLE STATE
+  // ============================================================
+
+  let pet = null;
+  let menu = null;
+  let activePanel = null;
+  let animationTimer = null;
+  let attackTimer = null;
+  let isAttacking = false;
+  let currentAction = "idle";
+  let currentDirection = "down";  // Start facing front
+  let currentFrame = 0;
+  let menuOpen = false;
+  let isDragging = false;
+  let hasDragged = false;
+  let dragOffsetX = 0;
+  let dragOffsetY = 0;
+  let mouseDownX = 0;
+  let mouseDownY = 0;
+  let prevMouseX = 0;
+  let prevMouseY = 0;
+  let abortController = null;
+
+  // ============================================================
+  // SPRITE URL HELPERS
+  // ============================================================
 
   function getSpriteURL(action, direction) {
     const folder = action.toUpperCase();
@@ -80,62 +73,27 @@
     return chrome.runtime.getURL("assets/Sprites/" + folder + "/" + file);
   }
 
-  // Special handling for attack folders which have a space + number
-  function getAttackSpriteURL(attackNum, direction) {
-    const folder = "ATTACK " + attackNum;
-    const file = "attack" + attackNum + "_" + direction + ".png";
+  function getAttackSpriteURL(num, direction) {
+    const folder = "ATTACK " + num;
+    const file = "attack" + num + "_" + direction + ".png";
     return chrome.runtime.getURL("assets/Sprites/" + folder + "/" + file);
   }
 
-  // ----------------------------------------------------------
-  // BUILD THE PET ELEMENT
-  // ----------------------------------------------------------
+  // ============================================================
+  // ANIMATION CORE
+  // ============================================================
 
-  const pet = document.createElement("div");
-  pet.id = "browser-pet";
+  function showFrame(frameIndex) {
+    if (!pet) return;
+    const offsetX = -(frameIndex * FRAME_WIDTH * SCALE);
+    pet.style.backgroundPosition = offsetX + "px 0";
+  }
 
-  Object.assign(pet.style, {
-    position: "fixed",
-    bottom: MARGIN + "px",
-    right: MARGIN + "px",
-    zIndex: "2147483647",
-    width: PET_DISPLAY_WIDTH + "px",
-    height: PET_DISPLAY_HEIGHT + "px",
-    backgroundRepeat: "no-repeat",
-    backgroundSize: (FRAME_WIDTH * TOTAL_FRAMES * SCALE) + "px " + (FRAME_HEIGHT * SCALE) + "px",
-    backgroundPosition: "0 0",
-    imageRendering: "pixelated",
-    cursor: "grab",
-    userSelect: "none",
-    pointerEvents: "auto",
-    overflow: "hidden",
-    border: "none",
-    padding: "0",
-    margin: "0",
-  });
-
-  document.body.appendChild(pet);
-
-  // ----------------------------------------------------------
-  // ANIMATION STATE
-  // ----------------------------------------------------------
-
-  let currentAction = "idle";       // "idle" or "run"
-  let currentDirection = "right";   // "right", "left", "up", "down"
-  let currentFrame = 0;             // 0–7
-  let animationTimer = null;        // setInterval ID
-
-  /**
-   * setSpriteSheet — load a new sprite sheet onto the pet.
-   *
-   * Changes the background-image to the correct sheet for the
-   * given action + direction. Resets the frame to 0.
-   */
   function setSpriteSheet(action, direction) {
+    if (!pet) return;
     let url;
     if (action === "attack1" || action === "attack2") {
-      const num = action.charAt(action.length - 1);
-      url = getAttackSpriteURL(num, direction);
+      url = getAttackSpriteURL(action.charAt(action.length - 1), direction);
     } else {
       url = getSpriteURL(action, direction);
     }
@@ -144,26 +102,6 @@
     showFrame(0);
   }
 
-  /**
-   * showFrame — display a specific frame (0–7) of the current
-   * sprite sheet by shifting background-position.
-   *
-   * Frame N is at horizontal offset -(N * frameWidth * scale)px.
-   * The background slides left so the Nth frame is visible
-   * through the div's fixed-size "window".
-   */
-  function showFrame(frameIndex) {
-    const offsetX = -(frameIndex * FRAME_WIDTH * SCALE);
-    pet.style.backgroundPosition = offsetX + "px 0";
-  }
-
-  /**
-   * startAnimation — begin looping through frames.
-   *
-   * Uses setInterval to call advanceFrame at a steady rate.
-   * We always clear any existing timer first to prevent
-   * multiple timers from stacking up.
-   */
   function startAnimation(frameDuration) {
     stopAnimation();
     animationTimer = setInterval(function () {
@@ -172,12 +110,6 @@
     }, frameDuration);
   }
 
-  /**
-   * stopAnimation — stop the frame-advance timer.
-   *
-   * Called when we switch animations or when we want the
-   * pet to freeze (e.g. before switching sheets).
-   */
   function stopAnimation() {
     if (animationTimer !== null) {
       clearInterval(animationTimer);
@@ -186,443 +118,164 @@
   }
 
   /**
-   * setAnimation — high-level function to switch the pet's
-   * animation state (action + direction).
-   *
-   * Only changes the sprite sheet if something actually changed
-   * (avoids unnecessary image loads and timer restarts).
+   * setAnimation — switch the pet's animation.
+   * NEVER interrupts an ongoing attack animation.
    */
   function setAnimation(action, direction) {
-    if (action === currentAction && direction === currentDirection) {
-      return; // nothing changed
-    }
-
+    if (isAttacking) return;
+    if (action === currentAction && direction === currentDirection) return;
     currentAction = action;
     currentDirection = direction;
     setSpriteSheet(action, direction);
-
-    const duration = action === "run" ? RUN_FRAME_DURATION : IDLE_FRAME_DURATION;
-    startAnimation(duration);
+    startAnimation(action === "run" ? RUN_FRAME_DURATION : IDLE_FRAME_DURATION);
   }
 
-  // ----------------------------------------------------------
-  // INITIAL ANIMATION — start idle facing right
-  // ----------------------------------------------------------
-
-  setSpriteSheet("idle", "right");
-  startAnimation(IDLE_FRAME_DURATION);
-
-  // ----------------------------------------------------------
-  // DIRECTION DETECTION
-  // ----------------------------------------------------------
-  // When the pet is being dragged, we determine direction from
-  // the mouse movement delta. We track the previous mouse
-  // position and compare it to the current one.
-  //
-  // We use a threshold to avoid flickering when the mouse
-  // barely moves — small movements are ignored.
-
-  let prevMouseX = 0;
-  let prevMouseY = 0;
-  const DIR_THRESHOLD = 3; // pixels of movement required
-
-  /**
-   * getDirection — determine facing direction from mouse delta.
-   *
-   * We compare the absolute horizontal vs vertical movement.
-   * Whichever axis has more movement wins:
-   *   |deltaX| > |deltaY| → left or right
-   *   |deltaY| > |deltaX| → up or down
-   *
-   * Returns the current direction if movement is below threshold.
-   */
   function getDirection(mouseX, mouseY) {
     const dx = mouseX - prevMouseX;
     const dy = mouseY - prevMouseY;
-
-    // Ignore tiny movements to prevent flicker
     if (Math.abs(dx) < DIR_THRESHOLD && Math.abs(dy) < DIR_THRESHOLD) {
       return currentDirection;
     }
-
-    // Horizontal movement dominates
-    if (Math.abs(dx) >= Math.abs(dy)) {
-      return dx > 0 ? "right" : "left";
-    }
-    // Vertical movement dominates
-    return dy > 0 ? "down" : "up";
+    return Math.abs(dx) >= Math.abs(dy)
+      ? (dx > 0 ? "right" : "left")
+      : (dy > 0 ? "down" : "up");
   }
 
-  // ----------------------------------------------------------
-  // DRAGGING LOGIC (updated for Phase 3 — click vs drag)
-  // ----------------------------------------------------------
+  // ============================================================
+  // PDF GENERATOR — raw PDF, no libraries, one-click download
+  // ============================================================
   //
-  // PHASE 3 — NEW CONCEPTS:
+  // Builds a valid PDF file from scratch using PDF operators:
+  //   BT/ET  — Begin/End text block
+  //   Tf     — Set font and size
+  //   Td     — Move text cursor (relative)
+  //   Tj     — Draw text string
+  //   rg     — Set fill color (RGB 0-1)
   //
-  // 1. Click vs Drag Detection
-  //    A "click" and a "drag" both start with mousedown. We need
-  //    to tell them apart. Our approach:
-  //      - On mousedown, record the position but DON'T start
-  //        dragging yet.
-  //      - On mousemove, if the mouse has moved more than a small
-  //        threshold (5px), THEN start dragging.
-  //      - On mouseup, if we never started dragging, treat it
-  //        as a click → toggle the menu.
+  // Uses Helvetica (built into every PDF reader, no embedding).
+  // Text is word-wrapped at ~82 characters per line.
   //
-  // 2. Dynamic Menu Creation
-  //    The menu is a <div> with child <button> elements, all
-  //    created with document.createElement(). Styles are applied
-  //    via JavaScript. The menu is positioned near the pet using
-  //    getBoundingClientRect().
-  //
-  // 3. Closing on Outside Click
-  //    We listen for clicks on the document. If the click target
-  //    is NOT inside the pet or the menu, we close the menu.
-  //    event.target + element.contains() are used for this check.
+  // The generated PDF has:
+  //   - Catalog → Pages → Page → Content Stream + Fonts
+  //   - Cross-reference table (xref) with byte offsets
+  //   - Trailer pointing to the root catalog
   //
 
-  let isDragging = false;
-  let hasDragged = false;    // true if mouse moved enough to be a drag
-  let dragOffsetX = 0;
-  let dragOffsetY = 0;
-  let mouseDownX = 0;
-  let mouseDownY = 0;
-  const DRAG_THRESHOLD = 5; // px — movement below this = click
-
-  pet.addEventListener("mousedown", function (e) {
-    if (e.button !== 0) return;
-
-    // Record where the mouse went down
-    mouseDownX = e.clientX;
-    mouseDownY = e.clientY;
-    hasDragged = false;
-
-    const rect = pet.getBoundingClientRect();
-    dragOffsetX = e.clientX - rect.left;
-    dragOffsetY = e.clientY - rect.top;
-
-    // Convert to top/left positioning for dragging
-    pet.style.left = rect.left + "px";
-    pet.style.top = rect.top + "px";
-    pet.style.right = "auto";
-    pet.style.bottom = "auto";
-
-    // Record for direction detection
-    prevMouseX = e.clientX;
-    prevMouseY = e.clientY;
-
-    isDragging = true;
-    e.preventDefault();
-  });
-
-  document.addEventListener("mousemove", function (e) {
-    if (!isDragging) return;
-
-    // Check if mouse has moved enough to count as a drag
-    const distX = Math.abs(e.clientX - mouseDownX);
-    const distY = Math.abs(e.clientY - mouseDownY);
-
-    if (!hasDragged && (distX > DRAG_THRESHOLD || distY > DRAG_THRESHOLD)) {
-      hasDragged = true;
-      pet.style.cursor = "grabbing";
-      closeMenu();
-      setAnimation("run", currentDirection);
+  function generatePDFBlob(title, content) {
+    // Escape special characters for PDF strings
+    function esc(s) {
+      return s
+        .replace(/\\/g, "\\\\")
+        .replace(/\(/g, "\\(")
+        .replace(/\)/g, "\\)")
+        .replace(/[^\x20-\x7E]/g, ""); // Strip non-ASCII for safety
     }
 
-    if (!hasDragged) return;
-
-    let newX = e.clientX - dragOffsetX;
-    let newY = e.clientY - dragOffsetY;
-
-    const maxX = window.innerWidth - PET_DISPLAY_WIDTH;
-    const maxY = window.innerHeight - PET_DISPLAY_HEIGHT;
-    newX = Math.max(0, Math.min(newX, maxX));
-    newY = Math.max(0, Math.min(newY, maxY));
-
-    pet.style.left = newX + "px";
-    pet.style.top = newY + "px";
-
-    const newDir = getDirection(e.clientX, e.clientY);
-    setAnimation("run", newDir);
-
-    prevMouseX = e.clientX;
-    prevMouseY = e.clientY;
-  });
-
-  document.addEventListener("mouseup", function (e) {
-    if (!isDragging) return;
-    isDragging = false;
-    pet.style.cursor = "grab";
-
-    if (hasDragged) {
-      // Was a drag — go back to idle
-      setAnimation("idle", currentDirection);
-    } else {
-      // Was a click — toggle the menu
-      toggleMenu();
-    }
-  });
-
-  // ----------------------------------------------------------
-  // PHASE 3 — PET INTERACTION MENU
-  // ----------------------------------------------------------
-  //
-  // The menu is a floating panel that appears next to the pet
-  // when clicked. It contains action buttons styled with a
-  // glassmorphism aesthetic (semi-transparent background, blur,
-  // rounded corners).
-
-  let menu = null;       // DOM element, created lazily
-  let menuOpen = false;
-
-  /**
-   * createMenu — build the menu DOM structure.
-   *
-   * We create it once and reuse it. The menu is a <div>
-   * containing styled <button> elements.
-   */
-  function createMenu() {
-    menu = document.createElement("div");
-    menu.id = "browser-pet-menu";
-
-    Object.assign(menu.style, {
-      position: "fixed",
-      zIndex: "2147483646",
-      display: "none",
-      flexDirection: "column",
-      gap: "4px",
-      padding: "8px",
-      borderRadius: "12px",
-      background: "rgba(20, 20, 35, 0.85)",
-      backdropFilter: "blur(12px)",
-      WebkitBackdropFilter: "blur(12px)",
-      border: "1px solid rgba(255, 255, 255, 0.12)",
-      boxShadow: "0 8px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255,255,255,0.05)",
-      fontFamily: "'Segoe UI', 'Inter', system-ui, sans-serif",
-      fontSize: "13px",
-      minWidth: "160px",
-      transition: "opacity 0.15s ease, transform 0.15s ease",
-      opacity: "0",
-      transform: "scale(0.95) translateY(4px)",
-    });
-
-    // Menu items
-    const items = [
-      { label: "⚔️  Attack!", action: doAttack },
-      { label: "📝  Create New Note", action: doCreateNote },
-      { label: "📒  My Notes", action: doMyNotes },
-      { label: "⚙️  Settings", action: doSettings },
-    ];
-
-    items.forEach(function (item) {
-      const btn = document.createElement("button");
-      btn.textContent = item.label;
-
-      Object.assign(btn.style, {
-        display: "block",
-        width: "100%",
-        padding: "10px 14px",
-        border: "none",
-        borderRadius: "8px",
-        background: "transparent",
-        color: "#e0e0e0",
-        fontSize: "13px",
-        fontFamily: "inherit",
-        textAlign: "left",
-        cursor: "pointer",
-        transition: "background 0.15s ease, color 0.15s ease, transform 0.1s ease",
-        outline: "none",
-        letterSpacing: "0.3px",
-      });
-
-      btn.addEventListener("mouseenter", function () {
-        btn.style.background = "rgba(255, 255, 255, 0.1)";
-        btn.style.color = "#ffffff";
-        btn.style.transform = "translateX(3px)";
-      });
-      btn.addEventListener("mouseleave", function () {
-        btn.style.background = "transparent";
-        btn.style.color = "#e0e0e0";
-        btn.style.transform = "translateX(0)";
-      });
-
-      btn.addEventListener("click", function (e) {
-        e.stopPropagation();
-        closeMenu();
-        item.action();
-      });
-
-      menu.appendChild(btn);
-    });
-
-    document.body.appendChild(menu);
-  }
-
-  /**
-   * positionMenu — place the menu above or beside the pet,
-   * keeping it within the viewport.
-   */
-  function positionMenu() {
-    const petRect = pet.getBoundingClientRect();
-
-    // Try to position above the pet, centered horizontally
-    let menuX = petRect.left + petRect.width / 2 - 80;
-    let menuY = petRect.top - 10; // 10px gap above pet
-
-    // Show briefly to measure
-    menu.style.display = "flex";
-    const menuRect = menu.getBoundingClientRect();
-    menu.style.display = "none";
-
-    // Position above the pet
-    menuY = petRect.top - menuRect.height - 10;
-
-    // If above the pet goes off-screen, position below
-    if (menuY < 8) {
-      menuY = petRect.bottom + 10;
-    }
-
-    // Keep horizontally in viewport
-    menuX = Math.max(8, Math.min(menuX, window.innerWidth - menuRect.width - 8));
-
-    menu.style.left = menuX + "px";
-    menu.style.top = menuY + "px";
-  }
-
-  /**
-   * openMenu / closeMenu / toggleMenu — control menu visibility.
-   *
-   * We use a short delay with opacity + transform for a smooth
-   * appear/disappear animation.
-   */
-  function openMenu() {
-    if (!menu) createMenu();
-    positionMenu();
-    menu.style.display = "flex";
-
-    // Force a reflow so the transition actually plays
-    void menu.offsetHeight;
-
-    menu.style.opacity = "1";
-    menu.style.transform = "scale(1) translateY(0)";
-    menuOpen = true;
-  }
-
-  function closeMenu() {
-    if (!menu || !menuOpen) return;
-    menu.style.opacity = "0";
-    menu.style.transform = "scale(0.95) translateY(4px)";
-    menuOpen = false;
-
-    // Hide after transition completes
-    setTimeout(function () {
-      if (!menuOpen && menu) {
-        menu.style.display = "none";
+    // Word-wrap text into lines of maxChars length
+    function wordWrap(text, maxChars) {
+      const result = [];
+      const paragraphs = text.split("\n");
+      for (let p = 0; p < paragraphs.length; p++) {
+        let para = paragraphs[p];
+        if (para.length === 0) { result.push(""); continue; }
+        while (para.length > 0) {
+          if (para.length <= maxChars) { result.push(para); break; }
+          let breakAt = para.lastIndexOf(" ", maxChars);
+          if (breakAt < maxChars * 0.4) breakAt = maxChars;
+          result.push(para.substring(0, breakAt));
+          para = para.substring(breakAt).replace(/^ /, "");
+        }
       }
-    }, 150);
-  }
-
-  function toggleMenu() {
-    if (menuOpen) {
-      closeMenu();
-    } else {
-      openMenu();
+      return result;
     }
+
+    const titleStr = esc(title);
+    const dateStr = esc("Created: " + new Date().toLocaleString());
+    const lines = wordWrap(content, 82);
+    const lineHeight = 15;
+
+    // Calculate page height based on content
+    const neededHeight = 100 + 22 + 26 + (lines.length * lineHeight) + 60;
+    const pageHeight = Math.max(792, neededHeight);
+    const startY = pageHeight - 52;
+
+    // Build text drawing commands (content stream)
+    let s = "BT\n";
+    // Title
+    s += "/F1 20 Tf\n";
+    s += "72 " + startY + " Td\n";
+    s += "(" + titleStr + ") Tj\n";
+    // Date (gray, italic)
+    s += "/F2 10 Tf\n";
+    s += "0.45 0.45 0.45 rg\n";
+    s += "0 -22 Td\n";
+    s += "(" + dateStr + ") Tj\n";
+    // Body
+    s += "0 0 0 rg\n";
+    s += "/F1 11 Tf\n";
+    s += "0 -26 Td\n";
+
+    for (let i = 0; i < lines.length; i++) {
+      s += "0 -" + lineHeight + " Td\n";
+      s += "(" + esc(lines[i] || " ") + ") Tj\n";
+    }
+
+    // Footer
+    s += "/F2 8 Tf\n";
+    s += "0.6 0.6 0.6 rg\n";
+    s += "0 -30 Td\n";
+    s += "(Exported from Browser Pet) Tj\n";
+    s += "ET\n";
+
+    // Build PDF objects
+    const objs = [];
+    objs[1] = "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+    objs[2] = "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+    objs[3] = "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 " + pageHeight + "] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>\nendobj\n";
+    objs[4] = "4 0 obj\n<< /Length " + s.length + " >>\nstream\n" + s + "endstream\nendobj\n";
+    objs[5] = "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+    objs[6] = "6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique >>\nendobj\n";
+
+    // Assemble the PDF with cross-reference table
+    let pdf = "%PDF-1.4\n";
+    const offsets = [];
+
+    for (let n = 1; n <= 6; n++) {
+      offsets[n] = pdf.length;
+      pdf += objs[n];
+    }
+
+    const xrefStart = pdf.length;
+    pdf += "xref\n0 7\n";
+    pdf += "0000000000 65535 f \n";
+    for (let n = 1; n <= 6; n++) {
+      pdf += String(offsets[n]).padStart(10, "0") + " 00000 n \n";
+    }
+    pdf += "trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n" + xrefStart + "\n%%EOF";
+
+    return new Blob([pdf], { type: "application/pdf" });
   }
-
-  // Close the menu when clicking anywhere outside pet + menu
-  document.addEventListener("click", function (e) {
-    if (!menuOpen) return;
-    if (pet.contains(e.target)) return;
-    if (menu && menu.contains(e.target)) return;
-    closeMenu();
-  });
-
-  // ----------------------------------------------------------
-  // PHASE 3.5 — SWORD SWING (Attack Animation)
-  // ----------------------------------------------------------
-  //
-  // Plays the ATTACK 1 sprite sheet once (8 frames), then
-  // returns to idle. We use a one-shot animation approach:
-  // setInterval runs but after exactly TOTAL_FRAMES we stop
-  // and switch back to idle.
-
-  let isAttacking = false;
-
-  function doAttack() {
-    if (isAttacking) return;
-    isAttacking = true;
-
-    // Stop current animation and load attack sheet
-    stopAnimation();
-    currentAction = "attack1";
-    setSpriteSheet("attack1", currentDirection);
-
-    let frame = 0;
-    const attackTimer = setInterval(function () {
-      frame++;
-      if (frame >= TOTAL_FRAMES) {
-        // Attack animation complete — return to idle
-        clearInterval(attackTimer);
-        isAttacking = false;
-        currentAction = "idle";
-        setSpriteSheet("idle", currentDirection);
-        startAnimation(IDLE_FRAME_DURATION);
-        return;
-      }
-      showFrame(frame);
-    }, 100); // 100ms per frame — fast and snappy
-  }
-
-  // ----------------------------------------------------------
-  // PHASE 4 — NOTES SYSTEM
-  // ----------------------------------------------------------
-  //
-  // NEW CONCEPTS:
-  //
-  // 1. chrome.storage.local
-  //    A key-value store provided by the Chrome Extension API.
-  //    Data persists across browser sessions and is shared
-  //    across all tabs.
-  //
-  //    chrome.storage.local.get(keys, callback)
-  //      Reads data. `keys` can be a string or array of strings.
-  //      The callback receives an object with the values.
-  //
-  //    chrome.storage.local.set(data, callback)
-  //      Writes data. `data` is an object of key-value pairs.
-  //
-  //    Unlike localStorage, chrome.storage.local:
-  //      - Is available in content scripts
-  //      - Has much larger storage limits (5MB+)
-  //      - Supports asynchronous operations
-  //      - Persists across all tabs of the extension
-  //
-  // 2. Dynamic Panels (Overlay UI)
-  //    We create floating panels for note creation and viewing.
-  //    Each panel is a <div> built entirely with createElement(),
-  //    styled via JavaScript, and positioned near the pet.
-  //
-  // 3. Data Model
-  //    Notes are stored as an array of objects:
-  //    [{ id, title, content, createdAt }, ...]
-  //    Each note gets a unique ID from Date.now() — simple
-  //    and good enough for local single-user storage.
-  //
-
-  let activePanel = null; // Track which panel is open
-
-  // ----------------------------------------------------------
-  // SHARED PANEL STYLING HELPERS
-  // ----------------------------------------------------------
 
   /**
-   * createPanel — creates a styled floating panel near the pet.
-   *
-   * Returns the panel <div> element. The caller adds content to it.
+   * exportNoteToPDF — one-click PDF download, no print dialog.
    */
+  function exportNoteToPDF(title, content) {
+    const blob = generatePDFBlob(title || "Untitled Note", content || "");
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = (title || "Untitled Note").replace(/[^a-zA-Z0-9 ]/g, "").trim() + ".pdf";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // ============================================================
+  // PANEL SYSTEM (floating UI panels near the pet)
+  // ============================================================
+
   function createPanel(title) {
-    // Close any existing panel first
     closePanel();
 
     const panel = document.createElement("div");
@@ -672,7 +325,7 @@
     });
 
     const closeBtn = document.createElement("button");
-    closeBtn.textContent = "✕";
+    closeBtn.textContent = "\u2715";
     Object.assign(closeBtn.style, {
       background: "none",
       border: "none",
@@ -699,21 +352,16 @@
     panel.appendChild(header);
 
     // Position near pet
-    const petRect = pet.getBoundingClientRect();
-    let panelX = petRect.left - 340;
-    let panelY = petRect.top + petRect.height / 2 - 200;
-
-    // If not enough space on left, position on right
-    if (panelX < 8) {
-      panelX = petRect.right + 20;
+    if (pet) {
+      const petRect = pet.getBoundingClientRect();
+      let panelX = petRect.left - 340;
+      let panelY = petRect.top + petRect.height / 2 - 200;
+      if (panelX < 8) panelX = petRect.right + 20;
+      panelY = Math.max(8, Math.min(panelY, window.innerHeight - 430));
+      panelX = Math.max(8, Math.min(panelX, window.innerWidth - 330));
+      panel.style.left = panelX + "px";
+      panel.style.top = panelY + "px";
     }
-    // Keep in viewport vertically
-    panelY = Math.max(8, Math.min(panelY, window.innerHeight - 430));
-    // Keep in viewport horizontally
-    panelX = Math.max(8, Math.min(panelX, window.innerWidth - 330));
-
-    panel.style.left = panelX + "px";
-    panel.style.top = panelY + "px";
 
     document.body.appendChild(panel);
     activePanel = panel;
@@ -737,9 +385,6 @@
     }, 200);
   }
 
-  /**
-   * createStyledButton — helper to make consistent panel buttons.
-   */
   function createStyledButton(text, bgColor, textColor) {
     const btn = document.createElement("button");
     btn.textContent = text;
@@ -767,9 +412,6 @@
     return btn;
   }
 
-  /**
-   * createStyledInput — helper for text inputs.
-   */
   function createStyledInput(placeholder) {
     const input = document.createElement("input");
     input.type = "text";
@@ -796,9 +438,6 @@
     return input;
   }
 
-  /**
-   * createStyledTextarea — helper for content areas.
-   */
   function createStyledTextarea(placeholder) {
     const textarea = document.createElement("textarea");
     textarea.placeholder = placeholder;
@@ -827,99 +466,180 @@
     return textarea;
   }
 
-  // ----------------------------------------------------------
-  // PDF EXPORT HELPER
-  // ----------------------------------------------------------
-  //
-  // Opens a small popup window with the note content formatted
-  // nicely, then triggers window.print(). Chrome's print dialog
-  // has "Save as PDF" as a built-in destination, so the user
-  // gets a real .pdf file without any external libraries.
+  // ============================================================
+  // MENU (glassmorphism floating menu near the pet)
+  // ============================================================
 
-  function exportNoteToPDF(title, content) {
-    const noteTitle = title || "Untitled Note";
-    const noteContent = (content || "").replace(/\n/g, "<br>");
-    const timestamp = new Date().toLocaleString();
+  function createMenu() {
+    menu = document.createElement("div");
+    menu.id = "browser-pet-menu";
 
-    const htmlContent = [
-      "<!DOCTYPE html>",
-      "<html><head>",
-      "<title>" + noteTitle + " — Browser Pet Note</title>",
-      "<style>",
-      "  * { margin: 0; padding: 0; box-sizing: border-box; }",
-      "  body {",
-      "    font-family: 'Segoe UI', 'Inter', system-ui, sans-serif;",
-      "    padding: 48px 56px;",
-      "    color: #1a1a2e;",
-      "    background: #fff;",
-      "    line-height: 1.6;",
-      "  }",
-      "  .header {",
-      "    border-bottom: 2px solid #6366f1;",
-      "    padding-bottom: 16px;",
-      "    margin-bottom: 24px;",
-      "  }",
-      "  .title {",
-      "    font-size: 24px;",
-      "    font-weight: 700;",
-      "    color: #1a1a2e;",
-      "    margin-bottom: 6px;",
-      "  }",
-      "  .meta {",
-      "    font-size: 12px;",
-      "    color: #888;",
-      "  }",
-      "  .content {",
-      "    font-size: 14px;",
-      "    color: #333;",
-      "    white-space: pre-wrap;",
-      "    word-break: break-word;",
-      "  }",
-      "  .footer {",
-      "    margin-top: 40px;",
-      "    padding-top: 12px;",
-      "    border-top: 1px solid #e0e0e0;",
-      "    font-size: 10px;",
-      "    color: #aaa;",
-      "    text-align: right;",
-      "  }",
-      "  @media print {",
-      "    body { padding: 36px 42px; }",
-      "  }",
-      "</style>",
-      "</head><body>",
-      "<div class='header'>",
-      "  <div class='title'>" + noteTitle + "</div>",
-      "  <div class='meta'>Created: " + timestamp + "</div>",
-      "</div>",
-      "<div class='content'>" + noteContent + "</div>",
-      "<div class='footer'>Exported from Browser Pet 🐾</div>",
-      "<script>window.onload=function(){window.print();}<\/script>",
-      "</body></html>",
-    ].join("\n");
+    Object.assign(menu.style, {
+      position: "fixed",
+      zIndex: "2147483646",
+      display: "none",
+      flexDirection: "column",
+      gap: "4px",
+      padding: "8px",
+      borderRadius: "12px",
+      background: "rgba(20, 20, 35, 0.85)",
+      backdropFilter: "blur(12px)",
+      WebkitBackdropFilter: "blur(12px)",
+      border: "1px solid rgba(255, 255, 255, 0.12)",
+      boxShadow: "0 8px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255,255,255,0.05)",
+      fontFamily: "'Segoe UI', 'Inter', system-ui, sans-serif",
+      fontSize: "13px",
+      minWidth: "160px",
+      transition: "opacity 0.15s ease, transform 0.15s ease",
+      opacity: "0",
+      transform: "scale(0.95) translateY(4px)",
+    });
 
-    const printWindow = window.open("", "_blank", "width=800,height=600");
-    if (printWindow) {
-      printWindow.document.write(htmlContent);
-      printWindow.document.close();
-    } else {
-      // Popup blocked — fallback: download as HTML
-      const blob = new Blob([htmlContent], { type: "text/html" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = noteTitle.replace(/[^a-zA-Z0-9 ]/g, "") + ".html";
-      a.click();
-      URL.revokeObjectURL(url);
-    }
+    const items = [
+      { label: "\u2694\uFE0F  Attack!", action: doAttack },
+      { label: "\uD83D\uDCDD  Create New Note", action: doCreateNote },
+      { label: "\uD83D\uDCD2  My Notes", action: doMyNotes },
+      { label: "\u2699\uFE0F  Settings", action: doSettings },
+      { label: "\uD83D\uDC4B  Hide Pet", action: doHidePet },
+    ];
+
+    items.forEach(function (item, index) {
+      const btn = document.createElement("button");
+      btn.textContent = item.label;
+
+      Object.assign(btn.style, {
+        display: "block",
+        width: "100%",
+        padding: "10px 14px",
+        border: "none",
+        borderRadius: "8px",
+        background: "transparent",
+        color: "#e0e0e0",
+        fontSize: "13px",
+        fontFamily: "inherit",
+        textAlign: "left",
+        cursor: "pointer",
+        transition: "background 0.15s ease, color 0.15s ease, transform 0.1s ease",
+        outline: "none",
+        letterSpacing: "0.3px",
+      });
+
+      // Separator line before "Hide Pet" (last item)
+      if (index === items.length - 1) {
+        const sep = document.createElement("div");
+        Object.assign(sep.style, {
+          height: "1px",
+          background: "rgba(255,255,255,0.08)",
+          margin: "4px 0",
+        });
+        menu.appendChild(sep);
+
+        // Red tint for "Hide Pet"
+        btn.style.color = "#f87171";
+      }
+
+      btn.addEventListener("mouseenter", function () {
+        btn.style.background = "rgba(255, 255, 255, 0.1)";
+        btn.style.color = index === items.length - 1 ? "#fca5a5" : "#ffffff";
+        btn.style.transform = "translateX(3px)";
+      });
+      btn.addEventListener("mouseleave", function () {
+        btn.style.background = "transparent";
+        btn.style.color = index === items.length - 1 ? "#f87171" : "#e0e0e0";
+        btn.style.transform = "translateX(0)";
+      });
+
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        closeMenu();
+        item.action();
+      });
+
+      menu.appendChild(btn);
+    });
+
+    document.body.appendChild(menu);
   }
 
-  // ----------------------------------------------------------
-  // CREATE NOTE
-  // ----------------------------------------------------------
+  function positionMenu() {
+    if (!pet || !menu) return;
+    const petRect = pet.getBoundingClientRect();
+    let menuX = petRect.left + petRect.width / 2 - 80;
+    let menuY = petRect.top - 10;
 
+    menu.style.display = "flex";
+    const menuRect = menu.getBoundingClientRect();
+    menu.style.display = "none";
+
+    menuY = petRect.top - menuRect.height - 10;
+    if (menuY < 8) menuY = petRect.bottom + 10;
+    menuX = Math.max(8, Math.min(menuX, window.innerWidth - menuRect.width - 8));
+
+    menu.style.left = menuX + "px";
+    menu.style.top = menuY + "px";
+  }
+
+  function openMenu() {
+    if (!menu) createMenu();
+    positionMenu();
+    menu.style.display = "flex";
+    void menu.offsetHeight;
+    menu.style.opacity = "1";
+    menu.style.transform = "scale(1) translateY(0)";
+    menuOpen = true;
+  }
+
+  function closeMenu() {
+    if (!menu || !menuOpen) return;
+    menu.style.opacity = "0";
+    menu.style.transform = "scale(0.95) translateY(4px)";
+    menuOpen = false;
+    setTimeout(function () {
+      if (!menuOpen && menu) menu.style.display = "none";
+    }, 150);
+  }
+
+  function toggleMenu() {
+    if (menuOpen) closeMenu();
+    else openMenu();
+  }
+
+  // ============================================================
+  // ACTIONS
+  // ============================================================
+
+  // ---- ATTACK (sword swing) ----
+  function doAttack() {
+    if (isAttacking || !pet) return;
+    isAttacking = true;
+
+    // Stop idle animation and load attack sprite
+    stopAnimation();
+    currentAction = "attack1";
+    setSpriteSheet("attack1", currentDirection);
+
+    // Play through all 8 frames once, then return to idle
+    let frame = 0;
+    attackTimer = setInterval(function () {
+      frame++;
+      if (frame >= TOTAL_FRAMES) {
+        clearInterval(attackTimer);
+        attackTimer = null;
+        isAttacking = false;
+        // Return to idle facing front
+        currentAction = "idle";
+        currentDirection = "down";
+        setSpriteSheet("idle", "down");
+        startAnimation(IDLE_FRAME_DURATION);
+        return;
+      }
+      showFrame(frame);
+    }, ATTACK_FRAME_DURATION);
+  }
+
+  // ---- CREATE NOTE ----
   function doCreateNote() {
-    const panel = createPanel("📝 Create New Note");
+    const panel = createPanel("\uD83D\uDCDD Create New Note");
 
     const body = document.createElement("div");
     Object.assign(body.style, {
@@ -929,7 +649,7 @@
       gap: "12px",
     });
 
-    // ⚠️ Warning banner
+    // Warning banner
     const warning = document.createElement("div");
     Object.assign(warning.style, {
       padding: "10px 12px",
@@ -944,7 +664,7 @@
       gap: "8px",
     });
     const warningIcon = document.createElement("span");
-    warningIcon.textContent = "⚠️";
+    warningIcon.textContent = "\u26A0\uFE0F";
     warningIcon.style.flexShrink = "0";
     const warningText = document.createElement("span");
     warningText.textContent = "Your note is not saved automatically. Click Save to keep it, or Export to download as PDF.";
@@ -954,7 +674,7 @@
     const titleInput = createStyledInput("Note title...");
     const contentArea = createStyledTextarea("Write your note here...");
 
-    // Button row
+    // Buttons
     const btnRow = document.createElement("div");
     Object.assign(btnRow.style, {
       display: "flex",
@@ -966,35 +686,24 @@
     const cancelBtn = createStyledButton("Cancel", "rgba(255,255,255,0.08)", "#aaa");
     cancelBtn.addEventListener("click", closePanel);
 
-    // Export as PDF button
-    const exportBtn = createStyledButton("📄 Export PDF", "rgba(34, 197, 94, 0.25)", "#22c55e");
+    const exportBtn = createStyledButton("\uD83D\uDCC4 Export PDF", "rgba(34, 197, 94, 0.25)", "#22c55e");
     exportBtn.addEventListener("click", function () {
-      const title = titleInput.value.trim();
-      const content = contentArea.value.trim();
-
-      if (!title && !content) {
-        titleInput.style.borderColor = "rgba(239, 68, 68, 0.6)";
-        return;
-      }
-
-      exportNoteToPDF(title, content);
+      const t = titleInput.value.trim();
+      const c = contentArea.value.trim();
+      if (!t && !c) { titleInput.style.borderColor = "rgba(239,68,68,0.6)"; return; }
+      exportNoteToPDF(t || "Untitled Note", c);
     });
 
-    // Save button (keeps note in chrome.storage.local)
-    const saveBtn = createStyledButton("💾 Save", "rgba(99, 102, 241, 0.8)", "#fff");
+    const saveBtn = createStyledButton("\uD83D\uDCBE Save", "rgba(99, 102, 241, 0.8)", "#fff");
     saveBtn.addEventListener("click", function () {
-      const title = titleInput.value.trim();
-      const content = contentArea.value.trim();
-
-      if (!title && !content) {
-        titleInput.style.borderColor = "rgba(239, 68, 68, 0.6)";
-        return;
-      }
+      const t = titleInput.value.trim();
+      const c = contentArea.value.trim();
+      if (!t && !c) { titleInput.style.borderColor = "rgba(239,68,68,0.6)"; return; }
 
       const note = {
         id: Date.now(),
-        title: title || "Untitled Note",
-        content: content,
+        title: t || "Untitled Note",
+        content: c,
         createdAt: new Date().toLocaleString(),
       };
 
@@ -1003,8 +712,10 @@
         notes.unshift(note);
         chrome.storage.local.set({ petNotes: notes }, function () {
           closePanel();
-          pet.style.filter = "brightness(1.5)";
-          setTimeout(function () { pet.style.filter = ""; }, 300);
+          if (pet) {
+            pet.style.filter = "brightness(1.5)";
+            setTimeout(function () { if (pet) pet.style.filter = ""; }, 300);
+          }
         });
       });
     });
@@ -1019,16 +730,12 @@
     body.appendChild(btnRow);
     panel.appendChild(body);
 
-    // Auto-focus the title input
     setTimeout(function () { titleInput.focus(); }, 100);
   }
 
-  // ----------------------------------------------------------
-  // VIEW NOTES (My Notes)
-  // ----------------------------------------------------------
-
+  // ---- MY NOTES ----
   function doMyNotes() {
-    const panel = createPanel("📒 My Notes");
+    const panel = createPanel("\uD83D\uDCD2 My Notes");
 
     const body = document.createElement("div");
     Object.assign(body.style, {
@@ -1038,7 +745,6 @@
       flexGrow: "1",
     });
 
-    // Loading state
     body.textContent = "Loading...";
     body.style.padding = "16px";
     body.style.color = "#888";
@@ -1058,12 +764,12 @@
           color: "#666",
           fontSize: "13px",
         });
-        empty.innerHTML = "📭<br><br>No notes yet.<br>Click <b>Create New Note</b> to get started!";
+        empty.innerHTML = "\uD83D\uDCED<br><br>No notes yet.<br>Click <b>Create New Note</b> to get started!";
         body.appendChild(empty);
         return;
       }
 
-      notes.forEach(function (note, index) {
+      notes.forEach(function (note) {
         const card = document.createElement("div");
         Object.assign(card.style, {
           padding: "12px 14px",
@@ -1081,7 +787,7 @@
           card.style.background = "rgba(255,255,255,0.04)";
         });
 
-        // Note header (title + delete button)
+        // Header row: title + export + delete
         const cardHeader = document.createElement("div");
         Object.assign(cardHeader.style, {
           display: "flex",
@@ -1101,18 +807,36 @@
           wordBreak: "break-word",
         });
 
+        // Export button
+        const exportBtn = document.createElement("button");
+        exportBtn.textContent = "\uD83D\uDCC4";
+        exportBtn.title = "Export as PDF";
+        Object.assign(exportBtn.style, {
+          background: "none", border: "none", cursor: "pointer",
+          fontSize: "14px", padding: "2px 4px", borderRadius: "4px",
+          transition: "background 0.15s", flexShrink: "0", opacity: "0.5",
+          marginRight: "2px",
+        });
+        exportBtn.addEventListener("mouseenter", function () {
+          exportBtn.style.background = "rgba(34,197,94,0.2)";
+          exportBtn.style.opacity = "1";
+        });
+        exportBtn.addEventListener("mouseleave", function () {
+          exportBtn.style.background = "none";
+          exportBtn.style.opacity = "0.5";
+        });
+        exportBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          exportNoteToPDF(note.title, note.content);
+        });
+
+        // Delete button
         const deleteBtn = document.createElement("button");
-        deleteBtn.textContent = "🗑";
+        deleteBtn.textContent = "\uD83D\uDDD1";
         Object.assign(deleteBtn.style, {
-          background: "none",
-          border: "none",
-          cursor: "pointer",
-          fontSize: "14px",
-          padding: "2px 4px",
-          borderRadius: "4px",
-          transition: "background 0.15s",
-          flexShrink: "0",
-          opacity: "0.5",
+          background: "none", border: "none", cursor: "pointer",
+          fontSize: "14px", padding: "2px 4px", borderRadius: "4px",
+          transition: "background 0.15s", flexShrink: "0", opacity: "0.5",
         });
         deleteBtn.addEventListener("mouseenter", function () {
           deleteBtn.style.background = "rgba(239,68,68,0.2)";
@@ -1127,52 +851,20 @@
           deleteNote(note.id);
         });
 
-        // Export button for this saved note
-        const exportNoteBtn = document.createElement("button");
-        exportNoteBtn.textContent = "📄";
-        Object.assign(exportNoteBtn.style, {
-          background: "none",
-          border: "none",
-          cursor: "pointer",
-          fontSize: "14px",
-          padding: "2px 4px",
-          borderRadius: "4px",
-          transition: "background 0.15s",
-          flexShrink: "0",
-          opacity: "0.5",
-          marginRight: "2px",
-        });
-        exportNoteBtn.title = "Export as PDF";
-        exportNoteBtn.addEventListener("mouseenter", function () {
-          exportNoteBtn.style.background = "rgba(34,197,94,0.2)";
-          exportNoteBtn.style.opacity = "1";
-        });
-        exportNoteBtn.addEventListener("mouseleave", function () {
-          exportNoteBtn.style.background = "none";
-          exportNoteBtn.style.opacity = "0.5";
-        });
-        exportNoteBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          exportNoteToPDF(note.title, note.content);
-        });
-
         cardHeader.appendChild(titleEl);
-        cardHeader.appendChild(exportNoteBtn);
+        cardHeader.appendChild(exportBtn);
         cardHeader.appendChild(deleteBtn);
         card.appendChild(cardHeader);
 
-        // Note content preview
+        // Content preview
         if (note.content) {
           const contentEl = document.createElement("div");
           contentEl.textContent = note.content.length > 100
             ? note.content.substring(0, 100) + "..."
             : note.content;
           Object.assign(contentEl.style, {
-            fontSize: "12px",
-            color: "#999",
-            lineHeight: "1.4",
-            marginBottom: "6px",
-            wordBreak: "break-word",
+            fontSize: "12px", color: "#999", lineHeight: "1.4",
+            marginBottom: "6px", wordBreak: "break-word",
           });
           card.appendChild(contentEl);
         }
@@ -1180,10 +872,7 @@
         // Date
         const dateEl = document.createElement("div");
         dateEl.textContent = note.createdAt || "";
-        Object.assign(dateEl.style, {
-          fontSize: "11px",
-          color: "#555",
-        });
+        Object.assign(dateEl.style, { fontSize: "11px", color: "#555" });
         card.appendChild(dateEl);
 
         body.appendChild(card);
@@ -1191,27 +880,18 @@
     });
   }
 
-  /**
-   * deleteNote — remove a note by ID and refresh the list.
-   */
   function deleteNote(noteId) {
     chrome.storage.local.get({ petNotes: [] }, function (result) {
-      const notes = result.petNotes.filter(function (n) {
-        return n.id !== noteId;
-      });
+      const notes = result.petNotes.filter(function (n) { return n.id !== noteId; });
       chrome.storage.local.set({ petNotes: notes }, function () {
-        // Refresh the notes view
-        doMyNotes();
+        doMyNotes(); // Refresh
       });
     });
   }
 
-  // ----------------------------------------------------------
-  // SETTINGS
-  // ----------------------------------------------------------
-
+  // ---- SETTINGS ----
   function doSettings() {
-    const panel = createPanel("⚙️ Settings");
+    const panel = createPanel("\u2699\uFE0F Settings");
 
     const body = document.createElement("div");
     Object.assign(body.style, {
@@ -1221,56 +901,38 @@
       gap: "16px",
     });
 
-    // Pet Scale setting
+    // Pet Scale
     const scaleGroup = document.createElement("div");
-
     const scaleLabel = document.createElement("label");
     scaleLabel.textContent = "Pet Size";
     Object.assign(scaleLabel.style, {
-      fontSize: "13px",
-      fontWeight: "500",
-      color: "#ccc",
-      display: "block",
-      marginBottom: "8px",
+      fontSize: "13px", fontWeight: "500", color: "#ccc",
+      display: "block", marginBottom: "8px",
     });
 
     const scaleRow = document.createElement("div");
-    Object.assign(scaleRow.style, {
-      display: "flex",
-      alignItems: "center",
-      gap: "12px",
-    });
+    Object.assign(scaleRow.style, { display: "flex", alignItems: "center", gap: "12px" });
 
     const scaleSlider = document.createElement("input");
     scaleSlider.type = "range";
-    scaleSlider.min = "1";
-    scaleSlider.max = "4";
-    scaleSlider.step = "0.5";
+    scaleSlider.min = "1"; scaleSlider.max = "4"; scaleSlider.step = "0.5";
     scaleSlider.value = String(SCALE);
-    Object.assign(scaleSlider.style, {
-      flex: "1",
-      accentColor: "#6366f1",
-      cursor: "pointer",
-    });
+    Object.assign(scaleSlider.style, { flex: "1", accentColor: "#6366f1", cursor: "pointer" });
 
     const scaleValue = document.createElement("span");
-    scaleValue.textContent = SCALE + "×";
-    Object.assign(scaleValue.style, {
-      fontSize: "13px",
-      color: "#aaa",
-      minWidth: "30px",
-    });
+    scaleValue.textContent = SCALE + "\u00D7";
+    Object.assign(scaleValue.style, { fontSize: "13px", color: "#aaa", minWidth: "30px" });
 
     scaleSlider.addEventListener("input", function () {
-      const newScale = parseFloat(scaleSlider.value);
-      scaleValue.textContent = newScale + "×";
-      // Update pet display size
-      pet.style.width = (FRAME_WIDTH * newScale) + "px";
-      pet.style.height = (FRAME_HEIGHT * newScale) + "px";
-      pet.style.backgroundSize = (FRAME_WIDTH * TOTAL_FRAMES * newScale) + "px " + (FRAME_HEIGHT * newScale) + "px";
-      // Re-render current frame at new scale
-      const offsetX = -(currentFrame * FRAME_WIDTH * newScale);
-      pet.style.backgroundPosition = offsetX + "px 0";
+      const ns = parseFloat(scaleSlider.value);
+      scaleValue.textContent = ns + "\u00D7";
+      if (pet) {
+        pet.style.width = (FRAME_WIDTH * ns) + "px";
+        pet.style.height = (FRAME_HEIGHT * ns) + "px";
+        pet.style.backgroundSize = (FRAME_WIDTH * TOTAL_FRAMES * ns) + "px " + (FRAME_HEIGHT * ns) + "px";
+        const offsetX = -(currentFrame * FRAME_WIDTH * ns);
+        pet.style.backgroundPosition = offsetX + "px 0";
+      }
     });
 
     scaleRow.appendChild(scaleSlider);
@@ -1281,43 +943,36 @@
 
     // Divider
     const divider = document.createElement("div");
-    Object.assign(divider.style, {
-      height: "1px",
-      background: "rgba(255,255,255,0.06)",
-    });
+    Object.assign(divider.style, { height: "1px", background: "rgba(255,255,255,0.06)" });
     body.appendChild(divider);
 
-    // Clear all notes
+    // Danger zone
     const dangerGroup = document.createElement("div");
-
     const dangerLabel = document.createElement("label");
     dangerLabel.textContent = "Danger Zone";
     Object.assign(dangerLabel.style, {
-      fontSize: "13px",
-      fontWeight: "500",
-      color: "#ef4444",
-      display: "block",
-      marginBottom: "8px",
+      fontSize: "13px", fontWeight: "500", color: "#ef4444",
+      display: "block", marginBottom: "8px",
     });
 
-    const clearBtn = createStyledButton("🗑 Delete All Notes", "rgba(239, 68, 68, 0.2)", "#ef4444");
+    const clearBtn = createStyledButton("\uD83D\uDDD1 Delete All Notes", "rgba(239,68,68,0.2)", "#ef4444");
     clearBtn.style.width = "100%";
     clearBtn.addEventListener("click", function () {
       if (clearBtn.dataset.confirm === "true") {
         chrome.storage.local.set({ petNotes: [] }, function () {
-          clearBtn.textContent = "✓ All notes deleted";
+          clearBtn.textContent = "\u2713 All notes deleted";
           clearBtn.style.background = "rgba(34, 197, 94, 0.2)";
           clearBtn.style.color = "#22c55e";
           setTimeout(closePanel, 1000);
         });
       } else {
         clearBtn.dataset.confirm = "true";
-        clearBtn.textContent = "⚠️ Click again to confirm";
+        clearBtn.textContent = "\u26A0\uFE0F Click again to confirm";
         clearBtn.style.background = "rgba(239, 68, 68, 0.35)";
         setTimeout(function () {
           clearBtn.dataset.confirm = "false";
-          clearBtn.textContent = "🗑 Delete All Notes";
-          clearBtn.style.background = "rgba(239, 68, 68, 0.2)";
+          clearBtn.textContent = "\uD83D\uDDD1 Delete All Notes";
+          clearBtn.style.background = "rgba(239,68,68,0.2)";
           clearBtn.style.color = "#ef4444";
         }, 3000);
       }
@@ -1327,49 +982,244 @@
     dangerGroup.appendChild(clearBtn);
     body.appendChild(dangerGroup);
 
-    // Version info
-    const versionEl = document.createElement("div");
-    versionEl.textContent = "Browser Pet v1.0.0";
-    Object.assign(versionEl.style, {
-      fontSize: "11px",
-      color: "#444",
-      textAlign: "center",
-      marginTop: "4px",
-    });
-    body.appendChild(versionEl);
+    // Version
+    const ver = document.createElement("div");
+    ver.textContent = "Browser Pet v1.0.0";
+    Object.assign(ver.style, { fontSize: "11px", color: "#444", textAlign: "center", marginTop: "4px" });
+    body.appendChild(ver);
 
     panel.appendChild(body);
   }
 
-  // Close panel on outside click (similar to menu)
-  document.addEventListener("mousedown", function (e) {
+  // ---- HIDE PET ----
+  function doHidePet() {
+    hidePet();
+  }
+
+  // ============================================================
+  // EVENT HANDLERS (named functions for AbortController cleanup)
+  // ============================================================
+  //
+  // AbortController lets us register event listeners with a
+  // "signal". When we call controller.abort(), ALL listeners
+  // attached with that signal are removed in one shot.
+  //
+  // Pet-element listeners are removed automatically when the
+  // element is removed from the DOM and garbage collected.
+  // Document-level listeners persist forever unless explicitly
+  // removed — that's why we use AbortController for those.
+  //
+
+  function onPetMouseDown(e) {
+    if (e.button !== 0) return;
+    mouseDownX = e.clientX;
+    mouseDownY = e.clientY;
+    hasDragged = false;
+
+    const rect = pet.getBoundingClientRect();
+    dragOffsetX = e.clientX - rect.left;
+    dragOffsetY = e.clientY - rect.top;
+
+    pet.style.left = rect.left + "px";
+    pet.style.top = rect.top + "px";
+    pet.style.right = "auto";
+    pet.style.bottom = "auto";
+
+    prevMouseX = e.clientX;
+    prevMouseY = e.clientY;
+    isDragging = true;
+    e.preventDefault();
+  }
+
+  function onDocMouseMove(e) {
+    if (!isDragging || !pet) return;
+
+    const distX = Math.abs(e.clientX - mouseDownX);
+    const distY = Math.abs(e.clientY - mouseDownY);
+
+    if (!hasDragged && (distX > DRAG_THRESHOLD || distY > DRAG_THRESHOLD)) {
+      hasDragged = true;
+      pet.style.cursor = "grabbing";
+      closeMenu();
+      setAnimation("run", currentDirection);
+    }
+
+    if (!hasDragged) return;
+
+    let newX = e.clientX - dragOffsetX;
+    let newY = e.clientY - dragOffsetY;
+    const maxX = window.innerWidth - PET_DISPLAY_WIDTH;
+    const maxY = window.innerHeight - PET_DISPLAY_HEIGHT;
+    newX = Math.max(0, Math.min(newX, maxX));
+    newY = Math.max(0, Math.min(newY, maxY));
+
+    pet.style.left = newX + "px";
+    pet.style.top = newY + "px";
+
+    const newDir = getDirection(e.clientX, e.clientY);
+    setAnimation("run", newDir);
+
+    prevMouseX = e.clientX;
+    prevMouseY = e.clientY;
+  }
+
+  function onDocMouseUp(e) {
+    if (!isDragging) return;
+    isDragging = false;
+    if (pet) pet.style.cursor = "grab";
+
+    if (hasDragged) {
+      // Face front when idle — "down" shows the character's face
+      setAnimation("idle", "down");
+    } else {
+      toggleMenu();
+    }
+  }
+
+  function onDocClick(e) {
+    if (!menuOpen) return;
+    if (pet && pet.contains(e.target)) return;
+    if (menu && menu.contains(e.target)) return;
+    closeMenu();
+  }
+
+  function onDocMouseDownCapture(e) {
     if (!activePanel) return;
     if (activePanel.contains(e.target)) return;
-    if (pet.contains(e.target)) return;
+    if (pet && pet.contains(e.target)) return;
     if (menu && menu.contains(e.target)) return;
     closePanel();
-  }, true);
+  }
 
-  // ----------------------------------------------------------
-  // All phases complete! 🎉
+  // ============================================================
+  // INIT PET — creates the pet and starts everything
+  // ============================================================
+
+  function initPet() {
+    if (pet) return; // Already running
+
+    abortController = new AbortController();
+    const signal = abortController.signal;
+
+    // Create the pet element
+    pet = document.createElement("div");
+    pet.id = "browser-pet";
+
+    Object.assign(pet.style, {
+      position: "fixed",
+      bottom: MARGIN + "px",
+      right: MARGIN + "px",
+      zIndex: "2147483647",
+      width: PET_DISPLAY_WIDTH + "px",
+      height: PET_DISPLAY_HEIGHT + "px",
+      backgroundRepeat: "no-repeat",
+      backgroundSize: (FRAME_WIDTH * TOTAL_FRAMES * SCALE) + "px " + (FRAME_HEIGHT * SCALE) + "px",
+      backgroundPosition: "0 0",
+      imageRendering: "pixelated",
+      cursor: "grab",
+      userSelect: "none",
+      pointerEvents: "auto",
+      overflow: "hidden",
+      border: "none",
+      padding: "0",
+      margin: "0",
+    });
+
+    document.body.appendChild(pet);
+
+    // Reset state
+    currentAction = "idle";
+    currentDirection = "down";
+    currentFrame = 0;
+    isAttacking = false;
+    menuOpen = false;
+    isDragging = false;
+    menu = null;
+    activePanel = null;
+
+    // Start idle animation facing front
+    setSpriteSheet("idle", "down");
+    startAnimation(IDLE_FRAME_DURATION);
+
+    // Register event listeners
+    pet.addEventListener("mousedown", onPetMouseDown);
+
+    // Document-level listeners use the AbortController signal.
+    // When hidePet() calls controller.abort(), these are ALL
+    // removed instantly — zero overhead after hiding.
+    document.addEventListener("mousemove", onDocMouseMove, { signal: signal });
+    document.addEventListener("mouseup", onDocMouseUp, { signal: signal });
+    document.addEventListener("click", onDocClick, { signal: signal });
+    document.addEventListener("mousedown", onDocMouseDownCapture, { capture: true, signal: signal });
+  }
+
+  // ============================================================
+  // HIDE PET — destroys everything, zero CPU when done
+  // ============================================================
   //
-  //  ✓ Pet appears on every webpage (Phase 1)
-  //  ✓ Stays fixed in the viewport (Phase 1)
-  //  ✓ Sits above all page content (Phase 1)
-  //  ✓ Can be dragged with the mouse (Phase 1)
-  //  ✓ Stays inside the visible viewport (Phase 1)
-  //  ✓ Plays IDLE animation when standing still (Phase 2)
-  //  ✓ Plays RUN animation while being dragged (Phase 2)
-  //  ✓ Faces the correct direction (Phase 2)
-  //  ✓ Click opens interaction menu (Phase 3)
-  //  ✓ Menu closes on outside click (Phase 3)
-  //  ✓ ⚔️ Attack swings sword (Phase 3.5)
-  //  ✓ Click vs drag properly distinguished (Phase 3)
-  //  ✓ Create notes with title + content (Phase 4)
-  //  ✓ View all saved notes (Phase 4)
-  //  ✓ Delete individual notes (Phase 4)
-  //  ✓ Delete all notes with confirmation (Phase 4)
-  //  ✓ Notes persist via chrome.storage.local (Phase 4)
-  //  ✓ Pet size settings (Phase 4)
-  // ----------------------------------------------------------
+  // After hidePet():
+  //   - No DOM elements remain
+  //   - No timers or intervals are running
+  //   - No document event listeners are attached
+  //   - The only thing alive is the chrome.runtime.onMessage
+  //     listener (negligible — only fires on explicit popup click)
+  //
+
+  function hidePet() {
+    // Stop all animations and timers
+    stopAnimation();
+    if (attackTimer) {
+      clearInterval(attackTimer);
+      attackTimer = null;
+    }
+    isAttacking = false;
+
+    // Remove all DOM elements
+    if (menu && menu.parentNode) menu.parentNode.removeChild(menu);
+    if (activePanel && activePanel.parentNode) activePanel.parentNode.removeChild(activePanel);
+    if (pet && pet.parentNode) pet.parentNode.removeChild(pet);
+
+    // Abort all document-level event listeners in one shot
+    if (abortController) {
+      abortController.abort();
+      abortController = null;
+    }
+
+    // Clear all references
+    pet = null;
+    menu = null;
+    activePanel = null;
+    animationTimer = null;
+    menuOpen = false;
+    isDragging = false;
+  }
+
+  // ============================================================
+  // MESSAGE LISTENER (always active — handles popup commands)
+  // ============================================================
+  //
+  // chrome.runtime.onMessage receives messages from:
+  //   - The extension popup (popup.js)
+  //   - Background scripts (if any)
+  //
+  // This is the ONLY code that runs when the pet is hidden.
+  // It costs zero CPU until a message is actually received.
+
+  chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+    if (msg.action === "showPet") {
+      initPet();
+      sendResponse({ status: "shown" });
+    } else if (msg.action === "hidePet") {
+      hidePet();
+      sendResponse({ status: "hidden" });
+    } else if (msg.action === "getPetStatus") {
+      sendResponse({ visible: !!pet });
+    }
+  });
+
+  // ============================================================
+  // AUTO-START — pet appears when the content script loads
+  // ============================================================
+  initPet();
+
 })();
