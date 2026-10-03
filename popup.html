@@ -1,58 +1,217 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
+  <title>Browser Pet</title>
+  <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      user-select: none;
+    }
+
     body {
-      width: 240px;
-      padding: 20px;
-      background: #12121e;
-      color: #e0e0e0;
-      font-family: 'Segoe UI', system-ui, sans-serif;
+      width: 270px;
+      padding: 0;
+      background: #c0c0b0;
+      color: #1a1a1a;
+      font-family: 'VT323', 'Courier New', monospace;
+      image-rendering: pixelated;
+      border: 2px solid #1a1a1a;
     }
-    .title {
-      font-size: 16px;
-      font-weight: 600;
-      color: #fff;
-      margin-bottom: 4px;
+
+    /* Title bar */
+    .titlebar {
+      background: #1a1a1a;
+      color: #d8d8c8;
+      padding: 6px 8px;
+      font-size: 15px;
+      text-align: center;
+      letter-spacing: 1px;
+      border-bottom: 2px solid #1a1a1a;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
+
+    .titlebar-deco {
+      font-size: 10px;
+      opacity: 0.6;
+      letter-spacing: 2px;
+    }
+
+    /* Content */
+    .content {
+      padding: 12px;
+    }
+
+    /* Pet preview avatar frame */
+    .avatar-frame {
+      width: 96px;
+      height: 80px;
+      margin: 0 auto 10px auto;
+      background: #2a2a2a;
+      border: 2px solid #1a1a1a;
+      box-shadow: inset 1px 1px 0 #1a1a1a, inset -1px -1px 0 #4a4a3a, 2px 2px 0 #1a1a1a;
+      overflow: hidden;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .avatar-sprite {
+      width: 96px;
+      height: 80px;
+      background-image: url('assets/Sprites/IDLE/idle_down.png');
+      background-repeat: no-repeat;
+      background-size: 768px 80px;
+      background-position: 0 0;
+      image-rendering: pixelated;
+      animation: previewIdle 1.2s steps(8) infinite;
+    }
+
+    @keyframes previewIdle {
+      from { background-position: 0 0; }
+      to { background-position: -768px 0; }
+    }
+
+    /* Status badge */
     #status {
-      font-size: 12px;
-      color: #888;
-      margin-bottom: 16px;
+      font-size: 16px;
+      font-weight: normal;
+      color: #1a1a1a;
+      margin-bottom: 10px;
+      padding: 4px 8px;
+      background: #d8d8c8;
+      border: 2px solid #8a8a7a;
+      box-shadow: inset 1px 1px 0 #8a8a7a;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
     }
+
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border: 1px solid #1a1a1a;
+    }
+
+    .status-dot.active {
+      background: #40b040;
+      box-shadow: 0 0 4px #40b040;
+    }
+
+    .status-dot.hidden {
+      background: #8a8a7a;
+    }
+
+    /* Action button */
     #toggle-btn {
       width: 100%;
-      padding: 10px;
-      border: none;
-      border-radius: 8px;
-      background: rgba(99, 102, 241, 0.8);
-      color: #fff;
-      font-size: 14px;
-      font-weight: 500;
+      padding: 8px;
+      border: 2px solid #1a1a1a;
+      background: #1a1a1a;
+      color: #d8d8c8;
+      font-size: 18px;
+      font-family: 'VT323', 'Courier New', monospace;
       cursor: pointer;
-      transition: opacity 0.15s;
-      font-family: inherit;
+      box-shadow: 2px 2px 0px #1a1a1a;
+      letter-spacing: 1px;
+      transition: none;
+      outline: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
     }
-    #toggle-btn:hover { opacity: 0.85; }
+
+    #toggle-btn:hover {
+      background: #3a3a2a;
+    }
+
+    #toggle-btn:active {
+      box-shadow: none;
+      transform: translate(2px, 2px);
+    }
+
+    #toggle-btn.hide-mode {
+      background: #c09090;
+      color: #8a2a2a;
+      border-color: #8a2a2a;
+      box-shadow: 2px 2px 0px #8a2a2a;
+    }
+
+    #toggle-btn.hide-mode:hover {
+      background: #b08080;
+    }
+
     #toggle-btn:disabled {
-      opacity: 0.4;
+      opacity: 0.5;
       cursor: not-allowed;
+      box-shadow: none;
     }
+
+    /* Divider */
+    .divider {
+      height: 2px;
+      background: #1a1a1a;
+      margin: 10px 0;
+    }
+
+    /* Info text */
+    .info {
+      font-size: 14px;
+      color: #3a3a2a;
+      line-height: 1.3;
+      margin-bottom: 8px;
+      background: #d8d8c8;
+      padding: 6px 8px;
+      border: 1px solid #8a8a7a;
+    }
+
     .version {
       text-align: center;
-      font-size: 10px;
-      color: #333;
-      margin-top: 12px;
+      font-size: 13px;
+      color: #8a8a7a;
+      margin-top: 10px;
+      letter-spacing: 1px;
     }
   </style>
 </head>
 <body>
-  <div class="title">&#x1F43E; Browser Pet</div>
-  <p id="status">Checking...</p>
-  <button id="toggle-btn">Loading...</button>
-  <p class="version">v1.0.0</p>
+  <div class="titlebar">
+    <span class="titlebar-deco">□■□</span>
+    <span>═ Browser Pet ═</span>
+    <span class="titlebar-deco">□■□</span>
+  </div>
+
+  <div class="content">
+    <!-- Animated Preview -->
+    <div class="avatar-frame">
+      <div class="avatar-sprite"></div>
+    </div>
+
+    <!-- Status badge -->
+    <div id="status">
+      <span>Status: <span id="status-text">Checking...</span></span>
+      <span class="status-dot hidden" id="status-dot"></span>
+    </div>
+
+    <!-- Main summon/hide button -->
+    <button id="toggle-btn" disabled>Loading...</button>
+
+    <div class="divider"></div>
+
+    <!-- Dynamic info message -->
+    <p class="info" id="info-text">Checking tab status...</p>
+
+    <p class="version">═══ v1.1.0 ═══</p>
+  </div>
+
   <script src="popup.js"></script>
 </body>
 </html>
