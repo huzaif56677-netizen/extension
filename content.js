@@ -828,6 +828,93 @@
   }
 
   // ----------------------------------------------------------
+  // PDF EXPORT HELPER
+  // ----------------------------------------------------------
+  //
+  // Opens a small popup window with the note content formatted
+  // nicely, then triggers window.print(). Chrome's print dialog
+  // has "Save as PDF" as a built-in destination, so the user
+  // gets a real .pdf file without any external libraries.
+
+  function exportNoteToPDF(title, content) {
+    const noteTitle = title || "Untitled Note";
+    const noteContent = (content || "").replace(/\n/g, "<br>");
+    const timestamp = new Date().toLocaleString();
+
+    const htmlContent = [
+      "<!DOCTYPE html>",
+      "<html><head>",
+      "<title>" + noteTitle + " — Browser Pet Note</title>",
+      "<style>",
+      "  * { margin: 0; padding: 0; box-sizing: border-box; }",
+      "  body {",
+      "    font-family: 'Segoe UI', 'Inter', system-ui, sans-serif;",
+      "    padding: 48px 56px;",
+      "    color: #1a1a2e;",
+      "    background: #fff;",
+      "    line-height: 1.6;",
+      "  }",
+      "  .header {",
+      "    border-bottom: 2px solid #6366f1;",
+      "    padding-bottom: 16px;",
+      "    margin-bottom: 24px;",
+      "  }",
+      "  .title {",
+      "    font-size: 24px;",
+      "    font-weight: 700;",
+      "    color: #1a1a2e;",
+      "    margin-bottom: 6px;",
+      "  }",
+      "  .meta {",
+      "    font-size: 12px;",
+      "    color: #888;",
+      "  }",
+      "  .content {",
+      "    font-size: 14px;",
+      "    color: #333;",
+      "    white-space: pre-wrap;",
+      "    word-break: break-word;",
+      "  }",
+      "  .footer {",
+      "    margin-top: 40px;",
+      "    padding-top: 12px;",
+      "    border-top: 1px solid #e0e0e0;",
+      "    font-size: 10px;",
+      "    color: #aaa;",
+      "    text-align: right;",
+      "  }",
+      "  @media print {",
+      "    body { padding: 36px 42px; }",
+      "  }",
+      "</style>",
+      "</head><body>",
+      "<div class='header'>",
+      "  <div class='title'>" + noteTitle + "</div>",
+      "  <div class='meta'>Created: " + timestamp + "</div>",
+      "</div>",
+      "<div class='content'>" + noteContent + "</div>",
+      "<div class='footer'>Exported from Browser Pet 🐾</div>",
+      "<script>window.onload=function(){window.print();}<\/script>",
+      "</body></html>",
+    ].join("\n");
+
+    const printWindow = window.open("", "_blank", "width=800,height=600");
+    if (printWindow) {
+      printWindow.document.write(htmlContent);
+      printWindow.document.close();
+    } else {
+      // Popup blocked — fallback: download as HTML
+      const blob = new Blob([htmlContent], { type: "text/html" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = noteTitle.replace(/[^a-zA-Z0-9 ]/g, "") + ".html";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  // ----------------------------------------------------------
   // CREATE NOTE
   // ----------------------------------------------------------
 
@@ -842,6 +929,28 @@
       gap: "12px",
     });
 
+    // ⚠️ Warning banner
+    const warning = document.createElement("div");
+    Object.assign(warning.style, {
+      padding: "10px 12px",
+      borderRadius: "8px",
+      background: "rgba(245, 158, 11, 0.12)",
+      border: "1px solid rgba(245, 158, 11, 0.25)",
+      color: "#f59e0b",
+      fontSize: "12px",
+      lineHeight: "1.4",
+      display: "flex",
+      alignItems: "flex-start",
+      gap: "8px",
+    });
+    const warningIcon = document.createElement("span");
+    warningIcon.textContent = "⚠️";
+    warningIcon.style.flexShrink = "0";
+    const warningText = document.createElement("span");
+    warningText.textContent = "Your note is not saved automatically. Click Save to keep it, or Export to download as PDF.";
+    warning.appendChild(warningIcon);
+    warning.appendChild(warningText);
+
     const titleInput = createStyledInput("Note title...");
     const contentArea = createStyledTextarea("Write your note here...");
 
@@ -851,11 +960,27 @@
       display: "flex",
       gap: "8px",
       justifyContent: "flex-end",
+      flexWrap: "wrap",
     });
 
     const cancelBtn = createStyledButton("Cancel", "rgba(255,255,255,0.08)", "#aaa");
     cancelBtn.addEventListener("click", closePanel);
 
+    // Export as PDF button
+    const exportBtn = createStyledButton("📄 Export PDF", "rgba(34, 197, 94, 0.25)", "#22c55e");
+    exportBtn.addEventListener("click", function () {
+      const title = titleInput.value.trim();
+      const content = contentArea.value.trim();
+
+      if (!title && !content) {
+        titleInput.style.borderColor = "rgba(239, 68, 68, 0.6)";
+        return;
+      }
+
+      exportNoteToPDF(title, content);
+    });
+
+    // Save button (keeps note in chrome.storage.local)
     const saveBtn = createStyledButton("💾 Save", "rgba(99, 102, 241, 0.8)", "#fff");
     saveBtn.addEventListener("click", function () {
       const title = titleInput.value.trim();
@@ -873,13 +998,11 @@
         createdAt: new Date().toLocaleString(),
       };
 
-      // Read existing notes, add new one, save back
       chrome.storage.local.get({ petNotes: [] }, function (result) {
         const notes = result.petNotes;
-        notes.unshift(note); // Add to beginning (newest first)
+        notes.unshift(note);
         chrome.storage.local.set({ petNotes: notes }, function () {
           closePanel();
-          // Brief flash on pet to confirm save
           pet.style.filter = "brightness(1.5)";
           setTimeout(function () { pet.style.filter = ""; }, 300);
         });
@@ -887,8 +1010,10 @@
     });
 
     btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(exportBtn);
     btnRow.appendChild(saveBtn);
 
+    body.appendChild(warning);
     body.appendChild(titleInput);
     body.appendChild(contentArea);
     body.appendChild(btnRow);
@@ -1002,7 +1127,37 @@
           deleteNote(note.id);
         });
 
+        // Export button for this saved note
+        const exportNoteBtn = document.createElement("button");
+        exportNoteBtn.textContent = "📄";
+        Object.assign(exportNoteBtn.style, {
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          fontSize: "14px",
+          padding: "2px 4px",
+          borderRadius: "4px",
+          transition: "background 0.15s",
+          flexShrink: "0",
+          opacity: "0.5",
+          marginRight: "2px",
+        });
+        exportNoteBtn.title = "Export as PDF";
+        exportNoteBtn.addEventListener("mouseenter", function () {
+          exportNoteBtn.style.background = "rgba(34,197,94,0.2)";
+          exportNoteBtn.style.opacity = "1";
+        });
+        exportNoteBtn.addEventListener("mouseleave", function () {
+          exportNoteBtn.style.background = "none";
+          exportNoteBtn.style.opacity = "0.5";
+        });
+        exportNoteBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          exportNoteToPDF(note.title, note.content);
+        });
+
         cardHeader.appendChild(titleEl);
+        cardHeader.appendChild(exportNoteBtn);
         cardHeader.appendChild(deleteBtn);
         card.appendChild(cardHeader);
 
