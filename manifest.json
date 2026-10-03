@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Pet",
+  "version": "1.0.0",
+  "description": "A small animated 2D companion pet that lives inside your browser tabs.",
+  "permissions": [
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/Sprites/IDLE/*",
+        "assets/Sprites/RUN/*",
+        "assets/Sprites/ATTACK 1/*",
+        "assets/Sprites/ATTACK 2/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
